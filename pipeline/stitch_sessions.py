@@ -257,6 +257,10 @@ def _behavior_staff_signal(session: Session, track: TrackSummary) -> bool:
         and camera_count >= 4
         and zone_count >= 4
         and duration_seconds >= 300
+    ) or (
+        camera_count >= 4
+        and zone_count >= 4
+        and duration_seconds >= 240
     )
 
 

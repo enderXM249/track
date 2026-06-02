@@ -7,6 +7,10 @@ from typing import Any
 
 from app.config import settings
 
+STORE_ALIASES = {
+    "STORE_BLR_002": "ST1008",
+}
+
 
 @lru_cache(maxsize=4)
 def load_layout(path: str | Path | None = None) -> dict[str, Any]:
@@ -19,7 +23,8 @@ def load_layout(path: str | Path | None = None) -> dict[str, Any]:
 
 def zones_for_store(store_id: str, path: str | Path | None = None) -> list[dict[str, Any]]:
     layout = load_layout(path)
-    store = layout.get("stores", {}).get(store_id, {})
+    stores = layout.get("stores", {})
+    store = stores.get(store_id) or stores.get(STORE_ALIASES.get(store_id, ""), {})
     return store.get("zones", [])
 
 

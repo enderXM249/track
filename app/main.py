@@ -13,9 +13,18 @@ from pydantic import ValidationError
 from app.analytics import compute_anomalies, compute_funnel, compute_heatmap, compute_metrics
 from app.config import settings
 from app.dashboard_html import dashboard_html
+from app.layout import STORE_ALIASES, load_layout
 from app.logging_config import configure_logging, request_logging_middleware
 from app.pos_import import import_pos_csv
-from app.schemas import EventIn, HealthResponse, IngestError, IngestResponse
+from app.schemas import (
+    EventIn,
+    HealthResponse,
+    IngestError,
+    IngestResponse,
+    VideoJobResponse,
+    VideoProcessAllRequest,
+    VideoProcessRequest,
+)
 from app.storage import (
     check_database,
     count_events,
@@ -26,6 +35,7 @@ from app.storage import (
     latest_event_timestamp_by_store,
 )
 from app.time_utils import parse_timestamp
+from app.video_jobs import create_all_videos_job, create_video_job, get_job, list_videos
 
 
 @asynccontextmanager
@@ -48,7 +58,7 @@ async def root() -> dict[str, Any]:
         "docs": "/docs",
         "dashboard": "/dashboard",
         "health": "/health",
-        "example_metrics": "/stores/ST1008/metrics",
+        "example_metrics": "/stores/STORE_BLR_002/metrics",
     }
 
 
@@ -94,8 +104,12 @@ CAMERA_VIDEO_FILES = {
 
 @app.get("/media/cameras")
 async def camera_media() -> dict[str, Any]:
+    layout = load_layout()
+    stores = layout.get("stores", {})
+    store = stores.get("STORE_BLR_002") or stores.get(STORE_ALIASES.get("STORE_BLR_002", ""), {})
     cameras = []
     for camera_id, filename in CAMERA_VIDEO_FILES.items():
+        camera_config = (store.get("cameras") or {}).get(camera_id, {})
         path = settings.cctv_dir_path / filename
         cameras.append(
             {
@@ -103,9 +117,55 @@ async def camera_media() -> dict[str, Any]:
                 "label": filename,
                 "available": path.exists(),
                 "url": f"/media/cameras/{camera_id}.mp4",
+                "detection_filter": camera_config.get("detection_filter", {}),
             }
         )
     return {"cameras": cameras}
+
+
+@app.get("/videos")
+async def videos() -> dict[str, Any]:
+    return list_videos()
+
+
+@app.post("/videos/process", response_model=VideoJobResponse, status_code=202)
+async def process_video(request: VideoProcessRequest) -> VideoJobResponse:
+    if not settings.enable_in_process_pipeline:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "In-process YOLOE pipeline is disabled in this API image. "
+                "Use `docker compose --profile live up --build` for raw CCTV processing."
+            ),
+        )
+    try:
+        return create_video_job(request)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/videos/process-all", response_model=VideoJobResponse, status_code=202)
+async def process_all_videos(request: VideoProcessAllRequest) -> VideoJobResponse:
+    if not settings.enable_in_process_pipeline:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "In-process YOLOE pipeline is disabled in this API image. "
+                "Use `docker compose --profile live up --build` for raw CCTV processing."
+            ),
+        )
+    try:
+        return create_all_videos_job(request)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/videos/jobs/{job_id}", response_model=VideoJobResponse)
+async def video_job(job_id: str) -> VideoJobResponse:
+    job = get_job(job_id)
+    if job.status == "not_found":
+        raise HTTPException(status_code=404, detail="Video processing job not found.")
+    return job
 
 
 @app.get("/media/cameras/{camera_id}.mp4")

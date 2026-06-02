@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+STORE_ALIASES = {
+    "STORE_BLR_002": "ST1008",
+}
+
 
 @dataclass(frozen=True)
 class Zone:
@@ -17,7 +21,8 @@ class Zone:
 def load_store_layout(path: Path, store_id: str) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         layout = json.load(handle)
-    return layout["stores"][store_id]
+    stores = layout["stores"]
+    return stores.get(store_id) or stores[STORE_ALIASES.get(store_id, store_id)]
 
 
 def load_zones(path: Path, store_id: str) -> list[Zone]:
@@ -62,3 +67,44 @@ class ZoneMapper:
     def entry_line(self, camera_id: str) -> dict[str, Any] | None:
         camera = self.store.get("cameras", {}).get(camera_id, {})
         return camera.get("entry_line")
+
+    def detection_filter(self, camera_id: str) -> dict[str, Any]:
+        camera = self.store.get("cameras", {}).get(camera_id, {})
+        return camera.get("detection_filter", {})
+
+    def is_valid_person_detection(
+        self,
+        camera_id: str,
+        bbox: tuple[float, float, float, float],
+        frame_width: float,
+        frame_height: float,
+    ) -> tuple[bool, str | None]:
+        filters = self.detection_filter(camera_id)
+        if not filters:
+            return True, None
+
+        x1, y1, x2, y2 = bbox
+        width_norm = max(0.0, (x2 - x1) / frame_width)
+        height_norm = max(0.0, (y2 - y1) / frame_height)
+        bottom_y_norm = y2 / frame_height
+        center_x_norm = ((x1 + x2) / 2) / frame_width
+        center_y_norm = ((y1 + y2) / 2) / frame_height
+
+        min_bottom = filters.get("min_bottom_y_norm")
+        if min_bottom is not None and bottom_y_norm < float(min_bottom):
+            return False, "bottom_center_above_walkable_floor"
+
+        min_height = filters.get("min_height_norm")
+        if min_height is not None and height_norm < float(min_height):
+            return False, "box_too_short_for_camera_person"
+
+        max_width = filters.get("max_width_norm")
+        if max_width is not None and width_norm > float(max_width):
+            return False, "box_too_wide_for_single_person"
+
+        for polygon in filters.get("ignore_polygons", []):
+            normalized_polygon = [tuple(point) for point in polygon]
+            if point_in_polygon(center_x_norm, center_y_norm, normalized_polygon):
+                return False, "center_inside_ignore_polygon"
+
+        return True, None

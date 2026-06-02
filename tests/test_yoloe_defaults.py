@@ -7,6 +7,7 @@
 # contract used by the dashboard and event metadata.
 
 from pathlib import Path
+from datetime import UTC, datetime
 from unittest import TestCase
 
 from pipeline.detect import DEFAULT_DETECTOR_MODEL, VideoProcessor
@@ -27,3 +28,16 @@ class YoloeDefaultTests(TestCase):
         self.assertFalse(role.is_staff)
         self.assertGreater(role.confidence, 0)
         self.assertNotIn("face_id", role.signals)
+
+    def test_detector_defaults_to_botsort_tracking(self) -> None:
+        processor = VideoProcessor(
+            video_path=Path("unused.mp4"),
+            output_path=Path("unused.jsonl"),
+            layout_path=Path("config/store_layout.json"),
+            store_id="STORE_BLR_002",
+            camera_id="CAM_1",
+            model_path=Path(DEFAULT_DETECTOR_MODEL),
+            clip_start=datetime.now(UTC),
+        )
+
+        self.assertEqual(processor.tracking_backend, "botsort")

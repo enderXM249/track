@@ -20,3 +20,4 @@ cam3_check.jsonl
 _camera_events/
 debug_frames/
 CCTV Footage/
+sample_data/store-intelligence-videos/*.mp4

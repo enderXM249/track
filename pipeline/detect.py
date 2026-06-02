@@ -9,7 +9,7 @@ from typing import Any
 from app.schemas import EventType
 from pipeline.emit import JsonlEmitter, build_event
 from pipeline.staff import classify_person_role
-from pipeline.tracker import CentroidTracker, Detection
+from pipeline.tracker import CentroidTracker, Detection, Track
 from pipeline.zones import ZoneMapper
 
 DEFAULT_DETECTOR_MODEL = "yoloe-26s-seg.pt"
@@ -26,6 +26,7 @@ class TrackState:
     last_x_norm: float | None = None
     last_y_norm: float | None = None
     has_entered: bool = False
+    has_exited: bool = False
     session_seq: int = 0
     is_staff: bool = False
     role_label: str = "customer"
@@ -44,8 +45,9 @@ class VideoProcessor:
     model_path: Path
     clip_start: datetime
     frame_stride: int = 5
-    confidence_threshold: float = 0.25
+    confidence_threshold: float = 0.05
     inference_imgsz: int = 960
+    tracking_backend: str = "botsort"
     states: dict[int, TrackState] = field(default_factory=dict)
     model_source_name: str = DEFAULT_DETECTOR_MODEL
     uses_open_vocab_detector: bool = True
@@ -88,9 +90,27 @@ class VideoProcessor:
                     continue
 
                 timestamp = self.clip_start + timedelta(seconds=frame_index / fps)
-                detections = self._detect_people(model, frame)
+                detections = [
+                    detection
+                    for detection in self._detect_people(model, frame)
+                    if zones.is_valid_person_detection(
+                        self.camera_id,
+                        detection.bbox,
+                        width,
+                        height,
+                    )[0]
+                ]
                 queue_depth = 0
-                tracks = tracker.update(detections)
+                if self.tracking_backend != "centroid" and all(
+                    detection.track_id is not None for detection in detections
+                ):
+                    tracks = [
+                        Track(track_id=int(detection.track_id), detection=detection)
+                        for detection in detections
+                        if detection.track_id is not None
+                    ]
+                else:
+                    tracks = tracker.update(detections)
 
                 for track in tracks:
                     x, y = track.detection.bottom_center
@@ -127,14 +147,34 @@ class VideoProcessor:
         if not self.uses_open_vocab_detector:
             predict_args["classes"] = [0]
 
-        predict = getattr(model, "predict", model)
-        results = predict(frame, **predict_args)
+        if self.tracking_backend != "centroid" and hasattr(model, "track"):
+            tracker_name = (
+                "bytetrack.yaml" if self.tracking_backend == "bytetrack" else "botsort.yaml"
+            )
+            results = model.track(
+                frame,
+                persist=True,
+                tracker=tracker_name,
+                **predict_args,
+            )
+        else:
+            predict = getattr(model, "predict", model)
+            results = predict(frame, **predict_args)
         detections: list[Detection] = []
         for result in results:
             for box in result.boxes:
                 conf = float(box.conf[0])
                 x1, y1, x2, y2 = [float(value) for value in box.xyxy[0].tolist()]
-                detections.append(Detection(bbox=(x1, y1, x2, y2), confidence=conf))
+                track_id = None
+                if getattr(box, "id", None) is not None:
+                    track_id = int(box.id[0])
+                detections.append(
+                    Detection(
+                        bbox=(x1, y1, x2, y2),
+                        confidence=conf,
+                        track_id=track_id,
+                    )
+                )
         return detections
 
     @staticmethod
@@ -215,7 +255,7 @@ class VideoProcessor:
         )
 
         entry_line = zones.entry_line(self.camera_id)
-        if entry_line and not state.has_entered:
+        if entry_line:
             orientation = entry_line.get("orientation", "horizontal")
             line = float(entry_line.get("position", 0.5))
             inbound_direction = entry_line.get("inbound_direction", "down")
@@ -231,11 +271,14 @@ class VideoProcessor:
                 if (inbound_positive and crossed_positive) or (
                     not inbound_positive and crossed_negative
                 ):
+                    event_type = EventType.REENTRY if state.has_entered and state.has_exited else EventType.ENTRY
                     state.has_entered = True
-                    events.append(self._event(state, EventType.ENTRY, timestamp, None, 0, confidence))
+                    state.has_exited = False
+                    events.append(self._event(state, event_type, timestamp, None, 0, confidence))
                 elif (inbound_positive and crossed_negative) or (
                     not inbound_positive and crossed_positive
                 ):
+                    state.has_exited = True
                     events.append(self._event(state, EventType.EXIT, timestamp, None, 0, confidence))
 
         if zone_id != state.last_zone_id:
@@ -342,6 +385,7 @@ class VideoProcessor:
                 else "YOLO",
                 "detector_prompt": ["person"] if self.uses_open_vocab_detector else None,
                 "inference_imgsz": self.inference_imgsz,
+                "tracking_backend": self.tracking_backend,
             },
         )
 
@@ -357,7 +401,7 @@ def main() -> None:
     parser.add_argument("--video", type=Path, required=True)
     parser.add_argument("--output", type=Path, default=Path("generated_events.jsonl"))
     parser.add_argument("--layout", type=Path, default=Path("config/store_layout.json"))
-    parser.add_argument("--store-id", default="ST1008")
+    parser.add_argument("--store-id", default="STORE_BLR_002")
     parser.add_argument("--camera-id", default="CAM_1")
     parser.add_argument(
         "--model",
@@ -368,6 +412,8 @@ def main() -> None:
     parser.add_argument("--clip-start", default="2026-04-10T11:30:00Z")
     parser.add_argument("--frame-stride", type=int, default=5)
     parser.add_argument("--imgsz", type=int, default=960)
+    parser.add_argument("--conf", type=float, default=0.05)
+    parser.add_argument("--tracker", choices=["botsort", "bytetrack", "centroid"], default="botsort")
     args = parser.parse_args()
 
     clip_start = datetime.fromisoformat(args.clip_start.replace("Z", "+00:00")).astimezone(UTC)
@@ -380,7 +426,9 @@ def main() -> None:
         model_path=args.model,
         clip_start=clip_start,
         frame_stride=args.frame_stride,
+        confidence_threshold=args.conf,
         inference_imgsz=args.imgsz,
+        tracking_backend=args.tracker,
     ).run()
     print({"events_written": count, "output": str(args.output)})
 

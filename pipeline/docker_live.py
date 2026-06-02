@@ -35,14 +35,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Docker helper: run YOLOE-26 detection and stream events into the API."
     )
-    parser.add_argument("--video-dir", type=Path, default=Path("/app/CCTV Footage"))
+    parser.add_argument("--video-dir", type=Path, default=Path("/app/sample_data/store-intelligence-videos"))
     parser.add_argument("--events", type=Path, default=Path("/data/generated_events_yoloe26.jsonl"))
     parser.add_argument("--layout", type=Path, default=Path("/app/config/store_layout.json"))
-    parser.add_argument("--store-id", default="ST1008")
+    parser.add_argument("--store-id", default="STORE_BLR_002")
     parser.add_argument("--model", type=Path, default=Path(DEFAULT_DETECTOR_MODEL))
     parser.add_argument("--clip-start", default="2026-04-10T11:20:00Z")
     parser.add_argument("--frame-stride", type=int, default=10)
+    parser.add_argument("--conf", type=float, default=0.05)
+    parser.add_argument("--tracker", choices=["botsort", "bytetrack", "centroid"], default="botsort")
     parser.add_argument("--imgsz", type=int, default=960)
+    parser.add_argument("--pos-csv", type=Path, default=Path("/app/Brigade_Bangalore_10_April_26 (1)bc6219c.csv"))
     parser.add_argument("--api-url", default="http://api:8000")
     parser.add_argument("--speed", type=float, default=12.0)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -65,7 +68,10 @@ def main() -> None:
             model=args.model,
             clip_start=clip_start,
             frame_stride=args.frame_stride,
+            confidence_threshold=args.conf,
             inference_imgsz=args.imgsz,
+            tracking_backend=args.tracker,
+            pos_csv=args.pos_csv,
             stitch=True,
         )
 

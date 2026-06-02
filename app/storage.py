@@ -7,12 +7,12 @@ from pathlib import Path
 from typing import Iterator
 
 from app.config import settings
+from app.layout import STORE_ALIASES
 from app.schemas import EventIn
 from app.time_utils import to_iso_z
 
 
 SCHEMA = """
-PRAGMA journal_mode = WAL;
 CREATE TABLE IF NOT EXISTS events (
     event_id TEXT PRIMARY KEY,
     store_id TEXT NOT NULL,
@@ -46,6 +46,10 @@ def connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
     path = Path(db_path or settings.db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
+    try:
+        conn.execute(f"PRAGMA journal_mode = {_journal_mode()}")
+    except sqlite3.OperationalError:
+        pass
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -60,6 +64,13 @@ def connect(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
 def init_db(db_path: Path | None = None) -> None:
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
+
+
+def _journal_mode() -> str:
+    journal_mode = settings.sqlite_journal_mode.upper()
+    if journal_mode not in {"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF"}:
+        return "OFF"
+    return journal_mode
 
 
 def check_database(db_path: Path | None = None) -> bool:
@@ -111,8 +122,9 @@ def fetch_events(
     end_ts: str | None = None,
     db_path: Path | None = None,
 ) -> list[sqlite3.Row]:
-    where = ["store_id = ?"]
-    params: list[object] = [store_id]
+    store_ids = _store_ids_for_query(store_id)
+    where = [f"store_id IN ({','.join('?' for _ in store_ids)})"]
+    params: list[object] = store_ids
     if start_ts:
         where.append("timestamp >= ?")
         params.append(start_ts)
@@ -130,34 +142,37 @@ def fetch_recent_events(
     db_path: Path | None = None,
 ) -> list[sqlite3.Row]:
     safe_limit = max(1, min(limit, 100))
+    store_ids = _store_ids_for_query(store_id)
     with connect(db_path) as conn:
         return list(
             conn.execute(
                 """
                 SELECT * FROM events
-                WHERE store_id = ?
+                WHERE store_id IN ({placeholders})
                 ORDER BY timestamp DESC
                 LIMIT ?
-                """,
-                (store_id, safe_limit),
+                """.format(placeholders=",".join("?" for _ in store_ids)),
+                (*store_ids, safe_limit),
             ).fetchall()
         )
 
 
 def latest_event_timestamp(store_id: str, db_path: Path | None = None) -> str | None:
+    store_ids = _store_ids_for_query(store_id)
     with connect(db_path) as conn:
         row = conn.execute(
-            "SELECT MAX(timestamp) AS timestamp FROM events WHERE store_id = ?",
-            (store_id,),
+            f"SELECT MAX(timestamp) AS timestamp FROM events WHERE store_id IN ({','.join('?' for _ in store_ids)})",
+            store_ids,
         ).fetchone()
     return row["timestamp"] if row else None
 
 
 def count_events(store_id: str, db_path: Path | None = None) -> int:
+    store_ids = _store_ids_for_query(store_id)
     with connect(db_path) as conn:
         row = conn.execute(
-            "SELECT COUNT(*) AS count FROM events WHERE store_id = ?",
-            (store_id,),
+            f"SELECT COUNT(*) AS count FROM events WHERE store_id IN ({','.join('?' for _ in store_ids)})",
+            store_ids,
         ).fetchone()
     return int(row["count"]) if row else 0
 
@@ -217,8 +232,9 @@ def fetch_pos_transactions(
     end_ts: str | None = None,
     db_path: Path | None = None,
 ) -> list[sqlite3.Row]:
-    where = ["store_id = ?"]
-    params: list[object] = [store_id]
+    store_ids = _store_ids_for_query(store_id)
+    where = [f"store_id IN ({','.join('?' for _ in store_ids)})"]
+    params: list[object] = store_ids
     if start_ts:
         where.append("timestamp >= ?")
         params.append(start_ts)
@@ -228,3 +244,15 @@ def fetch_pos_transactions(
     query = f"SELECT * FROM pos_transactions WHERE {' AND '.join(where)} ORDER BY timestamp ASC"
     with connect(db_path) as conn:
         return list(conn.execute(query, params).fetchall())
+
+
+def _store_ids_for_query(store_id: str) -> list[str]:
+    ids = [store_id]
+    alias_target = STORE_ALIASES.get(store_id)
+    if alias_target and alias_target not in ids:
+        ids.append(alias_target)
+    reverse_aliases = [alias for alias, target in STORE_ALIASES.items() if target == store_id]
+    for alias in reverse_aliases:
+        if alias not in ids:
+            ids.append(alias)
+    return ids

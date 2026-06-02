@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from pipeline.detect import DEFAULT_DETECTOR_MODEL, VideoProcessor
+from pipeline.enrich_events import enrich_billing_abandonment_file
 from pipeline.stitch_sessions import stitch_file
 
 
@@ -27,6 +28,9 @@ def process_all_cameras(
     clip_start: datetime,
     frame_stride: int,
     inference_imgsz: int,
+    confidence_threshold: float = 0.05,
+    tracking_backend: str = "botsort",
+    pos_csv: Path | None = None,
     stitch: bool = True,
 ) -> dict[str, object]:
     temp_dir = output.parent / "_camera_events"
@@ -52,7 +56,9 @@ def process_all_cameras(
             model_path=model,
             clip_start=clip_start,
             frame_stride=frame_stride,
+            confidence_threshold=confidence_threshold,
             inference_imgsz=inference_imgsz,
+            tracking_backend=tracking_backend,
         )
         count = processor.run()
         output_paths.append(camera_output)
@@ -77,9 +83,15 @@ def process_all_cameras(
         }
     else:
         stitched_count = stitch_file(combined_output, output)
+        enriched_count = (
+            enrich_billing_abandonment_file(output, output, pos_csv)
+            if pos_csv is not None and pos_csv.exists()
+            else stitched_count
+        )
         result = {
             "combined_events": total,
             "stitched_events": stitched_count,
+            "enriched_events": enriched_count,
             "camera_counts": camera_counts,
             "output": str(output),
             "stitched": True,
@@ -90,10 +102,10 @@ def process_all_cameras(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Process all CCTV camera clips into one JSONL.")
-    parser.add_argument("--video-dir", type=Path, default=Path("CCTV Footage"))
+    parser.add_argument("--video-dir", type=Path, default=Path("sample_data/store-intelligence-videos"))
     parser.add_argument("--output", type=Path, default=Path("generated_events.jsonl"))
     parser.add_argument("--layout", type=Path, default=Path("config/store_layout.json"))
-    parser.add_argument("--store-id", default="ST1008")
+    parser.add_argument("--store-id", default="STORE_BLR_002")
     parser.add_argument(
         "--model",
         type=Path,
@@ -106,6 +118,9 @@ def main() -> None:
     parser.add_argument("--clip-start", default="2026-04-10T11:30:00Z")
     parser.add_argument("--frame-stride", type=int, default=5)
     parser.add_argument("--imgsz", type=int, default=960)
+    parser.add_argument("--conf", type=float, default=0.05)
+    parser.add_argument("--tracker", choices=["botsort", "bytetrack", "centroid"], default="botsort")
+    parser.add_argument("--pos-csv", type=Path, default=Path("sample_data/sample_pos_transactions.csv"))
     parser.add_argument("--no-stitch", action="store_true")
     args = parser.parse_args()
 
@@ -118,7 +133,10 @@ def main() -> None:
         model=args.model,
         clip_start=clip_start,
         frame_stride=args.frame_stride,
+        confidence_threshold=args.conf,
         inference_imgsz=args.imgsz,
+        tracking_backend=args.tracker,
+        pos_csv=args.pos_csv,
         stitch=not args.no_stitch,
     )
 

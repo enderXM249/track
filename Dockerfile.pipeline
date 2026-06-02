@@ -6,7 +6,8 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY requirements-pipeline.txt /app/requirements-pipeline.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt -r /app/requirements-pipeline.txt
 
 COPY app /app/app
 COPY pipeline /app/pipeline
@@ -19,6 +20,4 @@ COPY README.md /app/README.md
 
 COPY ["Brigade_Bangalore_10_April_26 (1)bc6219c.csv", "/app/Brigade_Bangalore_10_April_26 (1)bc6219c.csv"]
 
-EXPOSE 8000
-
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "pipeline.run_all", "--video-dir", "/app/sample_data/store-intelligence-videos", "--output", "/data/generated_events_yoloe26.jsonl"]

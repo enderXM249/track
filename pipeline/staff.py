@@ -68,6 +68,8 @@ def classify_person_role(
     # while avoiding white shelves and common skin tones.
     purple_mask = cv2.inRange(hsv, np.array([120, 45, 35]), np.array([165, 255, 255]))
     purple_ratio = float((purple_mask > 0).mean())
+    dark_mask = cv2.inRange(hsv, np.array([0, 0, 0]), np.array([179, 95, 70]))
+    dark_ratio = float((dark_mask > 0).mean())
 
     head = crop[: max(1, int(crop_h * 0.35)), :]
     gray_head = cv2.cvtColor(head, cv2.COLOR_BGR2GRAY)
@@ -88,6 +90,10 @@ def classify_person_role(
         score += 0.75
     elif purple_ratio >= 0.18:
         score += 0.45
+    if dark_ratio >= 0.58 and (service_area_hint or billing_counter_hint):
+        score += 0.45
+    elif dark_ratio >= 0.42 and (service_area_hint or billing_counter_hint):
+        score += 0.28
 
     if head_sharpness >= 160 and purple_ratio >= 0.12:
         score += 0.2
@@ -95,9 +101,12 @@ def classify_person_role(
         score += 0.12
     if service_area_hint and purple_ratio >= 0.08:
         score += 0.16
+    if head_sharpness >= 140 and dark_ratio >= 0.45 and (service_area_hint or billing_counter_hint):
+        score += 0.12
 
     signals: dict[str, float | bool | str] = {
         "purple_ratio": round(purple_ratio, 4),
+        "dark_uniform_ratio": round(dark_ratio, 4),
         "head_sharpness": round(head_sharpness, 2),
         "camera_hint": camera_hint,
         "service_area_hint": service_area_hint,

@@ -415,7 +415,8 @@ def dashboard_html() -> str:
       <div class="sub">YOLOE-26 CCTV detection, staff/customer role overlays, and metrics from API-ingested events.</div>
     </div>
     <div class="controls">
-      <input id="storeId" value="ST1008" aria-label="Store ID">
+      <input id="storeId" value="STORE_BLR_002" aria-label="Store ID">
+      <button id="startPipeline">Start CCTV Pipeline</button>
       <button id="refresh">Refresh</button>
       <span class="status"><span id="dot" class="dot"></span><span id="statusText">Connecting</span></span>
     </div>
@@ -461,7 +462,7 @@ def dashboard_html() -> str:
         <div class="metric"><div class="label">Conversion Rate</div><div id="conversionRate" class="value">0%</div><div id="convertedVisitors" class="sub">0 converted</div></div>
         <div class="metric"><div class="label">Queue Depth</div><div id="queueDepth" class="value">0</div><div class="sub">latest billing event</div></div>
         <div id="eventMetric" class="metric"><div class="label">Stored Events</div><div id="eventCount" class="value">0</div><div id="lastEvent" class="sub">no events</div></div>
-        <div id="pipelineMetric" class="metric wide"><div class="label">Active Pipeline Link</div><div id="pipelineLink" class="value">Idle</div><div class="sub">changes when live replay posts into ingest</div></div>
+        <div id="pipelineMetric" class="metric wide"><div class="label">Active Pipeline Link</div><div id="pipelineLink" class="value">Idle</div><div id="jobStatus" class="sub">ready to process raw CCTV clips</div></div>
         <div class="metric wide">
           <div class="label">Model Signal Quality</div>
           <div id="qualitySummary" class="value">-</div>
@@ -499,9 +500,10 @@ def dashboard_html() -> str:
 
   <script>
     const state = {
-      storeId: "ST1008",
+      storeId: "STORE_BLR_002",
       selectedCamera: "CAM_3",
       cameras: [],
+      currentJobId: null,
       previousEventCount: null,
       pulseUntil: 0,
       lastEvents: []
@@ -539,6 +541,58 @@ def dashboard_html() -> str:
       }
       renderCameraTabs();
       setVideoSource();
+    }
+
+    async function startPipeline() {
+      state.storeId = document.getElementById("storeId").value.trim() || "STORE_BLR_002";
+      const button = document.getElementById("startPipeline");
+      button.disabled = true;
+      setText("jobStatus", "submitting all-camera YOLOE-26 job");
+      try {
+        const response = await fetch("/videos/process-all", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            video_dir: "sample_data/store-intelligence-videos",
+            store_id: state.storeId,
+            model: "yoloe-26s-seg.pt",
+            clip_start: "2026-04-10T11:20:00Z",
+            frame_stride: 10,
+            confidence_threshold: 0.05,
+            imgsz: 960,
+            tracker: "botsort",
+            stitch: true,
+            ingest: true
+          })
+        });
+        const job = await response.json();
+        if (!response.ok) throw new Error(job.detail || `HTTP ${response.status}`);
+        state.currentJobId = job.job_id;
+        setText("jobStatus", `${job.status}: ${job.message}`);
+        setText("pipelineLink", "Running");
+        pollJob();
+      } catch (error) {
+        setText("jobStatus", `pipeline error: ${error.message}`);
+        setText("pipelineLink", "Failed");
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function pollJob() {
+      if (!state.currentJobId) return;
+      try {
+        const response = await fetch(`/videos/jobs/${state.currentJobId}`, { cache: "no-store" });
+        const job = await response.json();
+        if (!response.ok) throw new Error(job.detail || `HTTP ${response.status}`);
+        setText("jobStatus", `${job.status}: ${job.events_ingested}/${job.events_written} ingested`);
+        setText("pipelineLink", job.status === "completed" ? "Complete" : job.status === "failed" ? "Failed" : "Running");
+        if (job.status !== "completed" && job.status !== "failed") {
+          setTimeout(pollJob, 3000);
+        }
+      } catch (error) {
+        setText("jobStatus", `job poll error: ${error.message}`);
+      }
     }
 
     function renderCameraTabs() {
@@ -651,9 +705,12 @@ def dashboard_html() -> str:
       }
 
       const latestByVisitor = new Map();
+      const selectedCamera = state.cameras.find(c => c.camera_id === state.selectedCamera);
+      const detectionFilter = (selectedCamera && selectedCamera.detection_filter) || {};
       events
         .filter(event => event.camera_id === state.selectedCamera)
         .filter(event => (Number(event.confidence) || 0) >= minConfidence)
+        .filter(event => passesDetectionFilter(event, detectionFilter))
         .filter(event => event.metadata && (event.metadata.bbox_xyxy || event.metadata.center_norm))
         .forEach(event => {
           const key = event.metadata.camera_visitor_id || event.visitor_id;
@@ -685,8 +742,22 @@ def dashboard_html() -> str:
       setText("detectionHud", `${cameraEvents.length} boxes above ${minConfidence.toFixed(2)} confidence`);
     }
 
+    function passesDetectionFilter(event, filter) {
+      const bbox = event.metadata && event.metadata.bbox_xyxy;
+      if (!Array.isArray(bbox) || bbox.length !== 4) return true;
+      const frameWidth = Number(event.metadata.frame_width) || 1920;
+      const frameHeight = Number(event.metadata.frame_height) || 1080;
+      const widthNorm = Math.max(0, (bbox[2] - bbox[0]) / frameWidth);
+      const heightNorm = Math.max(0, (bbox[3] - bbox[1]) / frameHeight);
+      const bottomYNorm = bbox[3] / frameHeight;
+      if (filter.min_bottom_y_norm !== undefined && bottomYNorm < Number(filter.min_bottom_y_norm)) return false;
+      if (filter.min_height_norm !== undefined && heightNorm < Number(filter.min_height_norm)) return false;
+      if (filter.max_width_norm !== undefined && widthNorm > Number(filter.max_width_norm)) return false;
+      return true;
+    }
+
     async function loadDashboard() {
-      state.storeId = document.getElementById("storeId").value.trim() || "ST1008";
+      state.storeId = document.getElementById("storeId").value.trim() || "STORE_BLR_002";
       try {
         const response = await fetch(`/stores/${encodeURIComponent(state.storeId)}/live?limit=80`, { cache: "no-store" });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -726,6 +797,7 @@ def dashboard_html() -> str:
     }
 
     document.getElementById("refresh").addEventListener("click", loadDashboard);
+    document.getElementById("startPipeline").addEventListener("click", startPipeline);
     document.getElementById("showOverlay").addEventListener("change", () => renderOverlay(state.lastEvents));
     document.getElementById("minConfidence").addEventListener("change", () => renderOverlay(state.lastEvents));
     loadCameras().then(loadDashboard).catch(loadDashboard);

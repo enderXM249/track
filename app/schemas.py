@@ -64,3 +64,58 @@ class HealthResponse(BaseModel):
     database: str
     last_event_timestamp_per_store: dict[str, str | None]
     warnings: list[dict[str, Any]]
+
+
+class VideoProcessRequest(BaseModel):
+    video_path: str | None = None
+    store_id: str = "STORE_BLR_002"
+    camera_id: str = "CAM_1"
+    model: str = "yoloe-26s-seg.pt"
+    clip_start: datetime
+    frame_stride: int = Field(default=10, ge=1, le=300)
+    confidence_threshold: float = Field(default=0.05, ge=0.0, le=1.0)
+    imgsz: int = Field(default=960, ge=320, le=1920)
+    tracker: str = Field(default="botsort", pattern="^(botsort|bytetrack|centroid)$")
+    ingest: bool = True
+
+    @field_validator("clip_start", mode="before")
+    @classmethod
+    def _parse_clip_start(cls, value: str | datetime) -> datetime:
+        return parse_timestamp(value)
+
+    @field_serializer("clip_start")
+    def _serialize_clip_start(self, value: datetime) -> str:
+        return to_iso_z(value) or ""
+
+
+class VideoProcessAllRequest(BaseModel):
+    video_dir: str | None = None
+    store_id: str = "STORE_BLR_002"
+    model: str = "yoloe-26s-seg.pt"
+    clip_start: datetime
+    frame_stride: int = Field(default=10, ge=1, le=300)
+    confidence_threshold: float = Field(default=0.05, ge=0.0, le=1.0)
+    imgsz: int = Field(default=960, ge=320, le=1920)
+    tracker: str = Field(default="botsort", pattern="^(botsort|bytetrack|centroid)$")
+    stitch: bool = True
+    ingest: bool = True
+
+    @field_validator("clip_start", mode="before")
+    @classmethod
+    def _parse_clip_start(cls, value: str | datetime) -> datetime:
+        return parse_timestamp(value)
+
+    @field_serializer("clip_start")
+    def _serialize_clip_start(self, value: datetime) -> str:
+        return to_iso_z(value) or ""
+
+
+class VideoJobResponse(BaseModel):
+    job_id: str
+    status: str
+    message: str
+    output_path: str | None = None
+    events_written: int = 0
+    events_ingested: int = 0
+    duplicates: int = 0
+    error: str | None = None

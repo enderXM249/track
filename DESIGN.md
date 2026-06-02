@@ -14,11 +14,15 @@ The data flow is:
 4. The API validates each event with Pydantic, deduplicates by `event_id`, and stores accepted events.
 5. Analytics modules compute metrics, funnel, heatmap, anomalies, and health directly from stored events and POS rows.
 
+The web dashboard is served by the same FastAPI application at `/dashboard`. It is not a static mock: it polls `/stores/{id}/live`, lists mounted camera feeds, shows recent detection boxes from event metadata, and can submit an all-camera raw CCTV processing job through `POST /videos/process-all`. The job runner is intentionally in-process for this MVP so `docker compose up` starts a complete application without Redis, Celery, or another worker service. For a higher-throughput production deployment, the `app/video_jobs.py` interface can be moved behind a durable queue while keeping the public API unchanged.
+
 ## Detection Design
 
 The detection pipeline supports a real YOLOE-26 path and a sample path. The production demo default is `yoloe-26s-seg.pt`, loaded through Ultralytics YOLOE with the text prompt restricted to `person`. This replaced the weak custom `models/best.pt` path for the main demo while keeping optional custom-model support for later comparisons. Tracking uses a lightweight centroid tracker in this repository. This is intentionally simple and explainable: it assigns stable camera-local track IDs, maps each person to zones, and uses zone transitions to emit `ZONE_ENTER`, `ZONE_EXIT`, and `ZONE_DWELL`.
 
 After all cameras are processed, `pipeline/stitch_sessions.py` converts camera-local visitor IDs such as `VIS_CAM_3_00001` into anonymous store-level session IDs such as `VIS_70594640`. The stitcher uses camera route order, event time gaps, zone context, and track-fragment guards. It preserves the original local ID in event metadata as `pre_stitch_visitor_id` and `camera_visitor_id`, so the reviewer can audit how a session was assembled.
+
+The detection layer now keeps evaluating the entry threshold after the first entry. That matters because a customer who exits and crosses inbound again should produce `REENTRY` under the same visitor token instead of a second unrelated `ENTRY`. Billing abandonment is added as a separate enrichment pass in `pipeline/enrich_events.py`: if a non-staff visitor leaves billing and no POS transaction appears within the configured five-minute window, the pipeline emits `BILLING_QUEUE_ABANDON`. This keeps the detector focused on visual behavior and keeps POS correlation explicit and testable.
 
 Zone mapping is rule based. The config file defines camera IDs, normalized polygons, and an entry threshold line. A detected person's bottom-center point is mapped into a polygon. This makes the approach auditable and easy to tune for the provided store layout. It also avoids depending on a VLM for every frame, which would be slower, costly, and harder to reproduce during evaluation.
 

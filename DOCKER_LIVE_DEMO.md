@@ -22,7 +22,7 @@ docker compose version
 From the project root:
 
 ```powershell
-cd C:\Users\rajma\Desktop\moumita
+cd E:\track\customer_track
 docker compose down
 Remove-Item data\store_intelligence.db -Force -ErrorAction SilentlyContinue
 docker compose --profile live up --build
@@ -53,7 +53,7 @@ http://127.0.0.1:8000/dashboard
 
 At first, event count and metrics should be zero or low. The dashboard includes:
 
-- CCTV video feed from the mounted `CCTV Footage` folder.
+- CCTV video feed from the mounted `sample_data/store-intelligence-videos` folder.
 - Camera selector for `CAM_1` through `CAM_5`.
 - YOLOE-26 detection overlay boxes from API event metadata.
 - Staff/customer role labels. Green means customer, amber means staff.
@@ -64,9 +64,9 @@ At first, event count and metrics should be zero or low. The dashboard includes:
 The `--profile live` command already generates and replays events. If you only want to replay an existing file in a second PowerShell terminal:
 
 ```powershell
-cd C:\Users\rajma\Desktop\moumita
+cd E:\track\customer_track
 .\.venv\Scripts\Activate.ps1
-python -m pipeline.live_replay --events generated_events_yoloe26.jsonl --api-url http://127.0.0.1:8000 --speed 12 --batch-size 1
+python -m pipeline.live_replay --events data/generated_events_yoloe26.jsonl --api-url http://127.0.0.1:8000 --speed 12 --batch-size 1
 ```
 
 The dashboard should update while this command runs.
@@ -79,7 +79,7 @@ yoloe-live Docker service
   -> /data/generated_events_yoloe26.jsonl
   -> POST /events/ingest inside Docker API
   -> SQLite /data/store_intelligence.db
-  -> GET /stores/ST1008/live
+  -> GET /stores/STORE_BLR_002/live
   -> /dashboard updates metrics and detection overlays on screen
 ```
 
@@ -88,7 +88,7 @@ yoloe-live Docker service
 If you run the demo again without deleting the database, use:
 
 ```powershell
-python -m pipeline.live_replay --events generated_events_yoloe26.jsonl --api-url http://127.0.0.1:8000 --speed 12 --batch-size 1 --fresh-run
+python -m pipeline.live_replay --events data/generated_events_yoloe26.jsonl --api-url http://127.0.0.1:8000 --speed 12 --batch-size 1 --fresh-run
 ```
 
 `--fresh-run` generates new event IDs and visitor suffixes so the API accepts the replay as a new live run.
@@ -98,8 +98,8 @@ python -m pipeline.live_replay --events generated_events_yoloe26.jsonl --api-url
 For a fast non-live API check:
 
 ```powershell
-python scripts/ingest_jsonl.py generated_events_yoloe26.jsonl --api-url http://127.0.0.1:8000
-Invoke-RestMethod http://127.0.0.1:8000/stores/ST1008/metrics
+python scripts/ingest_jsonl.py data/generated_events_yoloe26.jsonl --api-url http://127.0.0.1:8000
+Invoke-RestMethod http://127.0.0.1:8000/stores/STORE_BLR_002/metrics
 ```
 
 ## 7. Stop Docker

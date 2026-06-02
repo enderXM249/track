@@ -9,6 +9,7 @@ class Detection:
     bbox: tuple[float, float, float, float]
     confidence: float
     class_id: int = 0
+    track_id: int | None = None
 
     @property
     def centroid(self) -> tuple[float, float]:
