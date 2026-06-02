@@ -1,0 +1,87 @@
+services:
+  api:
+    build: .
+    container_name: store-intelligence-api
+    env_file:
+      - .env.example
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+      - ./models:/app/models:ro
+      - ./sample_data:/app/sample_data:ro
+      - ./CCTV Footage:/app/CCTV Footage:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  yoloe-generate:
+    build: .
+    container_name: store-intelligence-yoloe-generate
+    profiles:
+      - generate
+    env_file:
+      - .env.example
+    environment:
+      YOLO_CONFIG_DIR: /data/ultralytics
+    volumes:
+      - ./data:/data
+      - ./models:/app/models:ro
+      - ./CCTV Footage:/app/CCTV Footage:ro
+    command:
+      - python
+      - -m
+      - pipeline.run_all
+      - --video-dir
+      - /app/CCTV Footage
+      - --model
+      - yoloe-26s-seg.pt
+      - --clip-start
+      - "2026-04-10T11:20:00Z"
+      - --frame-stride
+      - "10"
+      - --imgsz
+      - "960"
+      - --output
+      - /data/generated_events_yoloe26.jsonl
+
+  yoloe-live:
+    build: .
+    container_name: store-intelligence-yoloe-live
+    profiles:
+      - live
+    depends_on:
+      api:
+        condition: service_healthy
+    env_file:
+      - .env.example
+    environment:
+      YOLO_CONFIG_DIR: /data/ultralytics
+    volumes:
+      - ./data:/data
+      - ./models:/app/models:ro
+      - ./CCTV Footage:/app/CCTV Footage:ro
+    command:
+      - python
+      - -m
+      - pipeline.docker_live
+      - --video-dir
+      - /app/CCTV Footage
+      - --model
+      - yoloe-26s-seg.pt
+      - --events
+      - /data/generated_events_yoloe26.jsonl
+      - --api-url
+      - http://api:8000
+      - --clip-start
+      - "2026-04-10T11:20:00Z"
+      - --frame-stride
+      - "10"
+      - --imgsz
+      - "960"
+      - --speed
+      - "12"
+      - --batch-size
+      - "1"

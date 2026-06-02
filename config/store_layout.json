@@ -1,0 +1,79 @@
+{
+  "stores": {
+    "ST1008": {
+      "store_name": "Brigade_Bangalore",
+      "city": "Bangalore",
+      "timezone": "Asia/Kolkata",
+      "open_hours": {
+        "open": "10:00",
+        "close": "22:00"
+      },
+      "cameras": {
+        "CAM_1": {
+          "label": "Main floor / display island"
+        },
+        "CAM_2": {
+          "label": "Main floor wall fixtures"
+        },
+        "CAM_3": {
+          "label": "Entry / exit threshold",
+          "entry_line": {
+            "orientation": "vertical",
+            "position": 0.72,
+            "inbound_direction": "left"
+          }
+        },
+        "CAM_4": {
+          "label": "Service / staff support area"
+        },
+        "CAM_5": {
+          "label": "Billing counter"
+        }
+      },
+      "zones": [
+        {
+          "zone_id": "ENTRY",
+          "camera_ids": ["CAM_3"],
+          "polygon": [[0.62, 0.0], [1.0, 0.0], [1.0, 1.0], [0.62, 1.0]],
+          "sku_zone": null
+        },
+        {
+          "zone_id": "SKINCARE",
+          "camera_ids": ["CAM_1", "CAM_2"],
+          "polygon": [[0.0, 0.0], [0.48, 0.0], [0.48, 0.62], [0.0, 0.62]],
+          "sku_zone": "SKINCARE"
+        },
+        {
+          "zone_id": "MAKEUP",
+          "camera_ids": ["CAM_1", "CAM_2"],
+          "polygon": [[0.48, 0.0], [1.0, 0.0], [1.0, 0.64], [0.48, 0.64]],
+          "sku_zone": "MAKEUP"
+        },
+        {
+          "zone_id": "HAIRCARE",
+          "camera_ids": ["CAM_1"],
+          "polygon": [[0.0, 0.62], [0.48, 0.62], [0.48, 1.0], [0.0, 1.0]],
+          "sku_zone": "HAIRCARE"
+        },
+        {
+          "zone_id": "FRAGRANCE",
+          "camera_ids": ["CAM_2"],
+          "polygon": [[0.48, 0.64], [1.0, 0.64], [1.0, 1.0], [0.48, 1.0]],
+          "sku_zone": "FRAGRANCE"
+        },
+        {
+          "zone_id": "SERVICE_AREA",
+          "camera_ids": ["CAM_4"],
+          "polygon": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+          "sku_zone": "SERVICE"
+        },
+        {
+          "zone_id": "BILLING",
+          "camera_ids": ["CAM_5"],
+          "polygon": [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+          "sku_zone": "CHECKOUT"
+        }
+      ]
+    }
+  }
+}

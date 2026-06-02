@@ -1,0 +1,15 @@
+__pycache__/
+.pytest_cache/
+.test_tmp/
+.venv/
+venv/
+data/
+runs/
+models/
+*.pt
+mobileclip*.ts
+CCTV Footage/
+*.pdf
+*.xlsx
+generated_events.jsonl
+generated_events_*.jsonl

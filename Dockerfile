@@ -1,0 +1,25 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY requirements.txt /app/requirements.txt
+COPY requirements-pipeline.txt /app/requirements-pipeline.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt -r /app/requirements-pipeline.txt
+
+COPY app /app/app
+COPY pipeline /app/pipeline
+COPY dashboard /app/dashboard
+COPY config /app/config
+COPY sample_data /app/sample_data
+COPY docs /app/docs
+COPY scripts /app/scripts
+COPY README.md /app/README.md
+
+COPY ["Brigade_Bangalore_10_April_26 (1)bc6219c.csv", "/app/Brigade_Bangalore_10_April_26 (1)bc6219c.csv"]
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

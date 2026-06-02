@@ -1,0 +1,22 @@
+__pycache__/
+.pytest_cache/
+.test_tmp/
+.coverage
+htmlcov/
+.venv/
+venv/
+data/
+*.db
+*.sqlite
+*.pyc
+runs/
+models/*.pt
+*.pt
+mobileclip*.ts
+events.jsonl
+generated_events.jsonl
+generated_events_stitched.jsonl
+cam3_check.jsonl
+_camera_events/
+debug_frames/
+CCTV Footage/
