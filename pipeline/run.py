@@ -27,8 +27,8 @@ def main() -> None:
     parser.add_argument("--frame-stride", type=int, default=5)
     parser.add_argument("--imgsz", type=int, default=960)
     parser.add_argument("--conf", type=float, default=0.05)
-    parser.add_argument("--tracker", choices=["botsort", "bytetrack", "centroid"], default="botsort")
-    parser.add_argument("--pos-csv", type=Path, default=Path("sample_data/sample_pos_transactions.csv"))
+    parser.add_argument("--tracker", choices=["botsort", "bytetrack", "centroid"], default="bytetrack")
+    parser.add_argument("--pos-csv", type=Path, default=Path("POS - sample transactionsb1e826f.csv"))
     args = parser.parse_args()
 
     if args.mode == "sample":

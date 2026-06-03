@@ -39,7 +39,7 @@ class PipelineEventTests(TestCase):
             layout_path=Path("config/store_layout.json"),
             store_id="ST1008",
             camera_id="CAM_3",
-            model_path=Path("yoloe-26s-seg.pt"),
+            model_path=Path("models/best.pt"),
             clip_start=datetime(2026, 4, 10, 11, 20, tzinfo=UTC),
         )
         processor.states[1] = TrackState(
@@ -91,6 +91,38 @@ class PipelineEventTests(TestCase):
         self.assertEqual(len(abandon), 1)
         self.assertEqual(abandon[0]["metadata"]["queue_depth"], 4)
 
+    def test_custom_model_staff_class_sets_staff_flag(self) -> None:
+        processor = VideoProcessor(
+            video_path=Path("unused.mp4"),
+            output_path=Path("unused.jsonl"),
+            layout_path=Path("config/store_layout.json"),
+            store_id="ST1008",
+            camera_id="CAM_1",
+            model_path=Path("models/best.pt"),
+            clip_start=datetime(2026, 4, 10, 11, 20, tzinfo=UTC),
+        )
+
+        events = processor._events_for_track(
+            frame=None,
+            track_id=5,
+            detection=Detection(
+                bbox=(50, 10, 70, 80),
+                confidence=0.88,
+                class_id=0,
+                class_name="staff",
+            ),
+            timestamp=datetime(2026, 4, 10, 11, 20, tzinfo=UTC),
+            width=100,
+            height=100,
+            zones=_ZoneOnlyFakeZones(),
+            queue_depth=0,
+        )
+
+        self.assertTrue(events[0]["is_staff"])
+        self.assertEqual(events[0]["metadata"]["person_role"], "staff")
+        self.assertEqual(events[0]["metadata"]["role_source"], "custom_yolov8_class")
+        self.assertEqual(events[0]["metadata"]["detector_family"], "YOLOv8-custom-staff-customer")
+
 
 class _FakeZones:
     def entry_line(self, camera_id: str) -> dict[str, object]:
@@ -98,3 +130,11 @@ class _FakeZones:
 
     def zone_for_point(self, camera_id: str, x_norm: float, y_norm: float) -> None:
         return None
+
+
+class _ZoneOnlyFakeZones:
+    def entry_line(self, camera_id: str) -> None:
+        return None
+
+    def zone_for_point(self, camera_id: str, x_norm: float, y_norm: float) -> object:
+        return type("Zone", (), {"zone_id": "SKINCARE", "sku_zone": "MOISTURISER"})()

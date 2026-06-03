@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import ValidationError
+from starlette.concurrency import run_in_threadpool
 
-from app.analytics import compute_anomalies, compute_funnel, compute_heatmap, compute_metrics
+from app.analytics import (
+    compute_anomalies,
+    compute_funnel,
+    compute_heatmap,
+    compute_live_analytics,
+    compute_metrics,
+)
 from app.config import settings
 from app.dashboard_html import dashboard_html
 from app.layout import STORE_ALIASES, load_layout
@@ -48,6 +59,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=settings.app_name, version="1.0.0", lifespan=lifespan)
 app.middleware("http")(request_logging_middleware)
+
+_LIVE_CACHE_TTL_SECONDS = 4.0
+_live_cache_lock = threading.Lock()
+_live_cache: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
 
 
 @app.get("/")
@@ -102,25 +117,90 @@ CAMERA_VIDEO_FILES = {
 }
 
 
+def _clip_library_root() -> Path:
+    docker_path = Path("/data/clips")
+    if docker_path.exists():
+        return docker_path
+    return Path("data/clips")
+
+
+def _browser_clip_root() -> Path:
+    docker_path = Path("/data/browser_clips")
+    if docker_path.exists():
+        return docker_path
+    return Path("data/browser_clips")
+
+
+def _camera_id_from_filename(path: Path, fallback_index: int) -> str:
+    stem = path.stem.lower()
+    match = re.search(r"cam\s*[_ -]?(\d+)", stem)
+    if match:
+        return f"CAM_{match.group(1)}"
+    if "billing" in stem:
+        return "CAM_5"
+    if "entry 1" in stem or "entry_1" in stem:
+        return "CAM_3"
+    if "entry 2" in stem or "entry_2" in stem:
+        return "CAM_4"
+    if "entry" in stem:
+        return "CAM_3"
+    if "zone" in stem:
+        return "CAM_1"
+    return f"CAM_{fallback_index}"
+
+
+def _clip_sets() -> list[dict[str, Any]]:
+    root = _clip_library_root()
+    sets = [{"id": "sample", "label": "Sample CCTV", "path": str(settings.cctv_dir_path)}]
+    if root.exists():
+        for folder in sorted(path for path in root.iterdir() if path.is_dir()):
+            sets.append({"id": folder.name, "label": folder.name, "path": str(folder)})
+    return sets
+
+
+def _camera_files_for_clip_set(clip_set: str) -> dict[str, Path]:
+    if clip_set == "sample":
+        return {camera_id: settings.cctv_dir_path / filename for camera_id, filename in CAMERA_VIDEO_FILES.items()}
+    root = _clip_library_root()
+    folder = (root / clip_set).resolve()
+    try:
+        folder.relative_to(root.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid clip_set") from exc
+    if not folder.exists() or not folder.is_dir():
+        raise HTTPException(status_code=404, detail=f"Clip set not found: {clip_set}")
+    camera_files: dict[str, Path] = {}
+    for index, path in enumerate(sorted(folder.glob("*.mp4")), start=1):
+        camera_id = _camera_id_from_filename(path, index)
+        if camera_id not in camera_files:
+            camera_files[camera_id] = path
+    return camera_files
+
+
+def _browser_video_path(clip_set: str, camera_id: str, original_path: Path) -> Path:
+    preview = _browser_clip_root() / clip_set / f"{camera_id}.mp4"
+    return preview if preview.exists() else original_path
+
+
 @app.get("/media/cameras")
-async def camera_media() -> dict[str, Any]:
+async def camera_media(clip_set: str = "sample") -> dict[str, Any]:
     layout = load_layout()
     stores = layout.get("stores", {})
     store = stores.get("STORE_BLR_002") or stores.get(STORE_ALIASES.get("STORE_BLR_002", ""), {})
     cameras = []
-    for camera_id, filename in CAMERA_VIDEO_FILES.items():
+    camera_files = _camera_files_for_clip_set(clip_set)
+    for camera_id, path in sorted(camera_files.items()):
         camera_config = (store.get("cameras") or {}).get(camera_id, {})
-        path = settings.cctv_dir_path / filename
         cameras.append(
             {
                 "camera_id": camera_id,
-                "label": filename,
+                "label": path.name,
                 "available": path.exists(),
-                "url": f"/media/cameras/{camera_id}.mp4",
+                "url": f"/media/cameras/{camera_id}.mp4?clip_set={clip_set}",
                 "detection_filter": camera_config.get("detection_filter", {}),
             }
         )
-    return {"cameras": cameras}
+    return {"clip_set": clip_set, "clip_sets": _clip_sets(), "cameras": cameras}
 
 
 @app.get("/videos")
@@ -134,7 +214,7 @@ async def process_video(request: VideoProcessRequest) -> VideoJobResponse:
         raise HTTPException(
             status_code=503,
             detail=(
-                "In-process YOLOE pipeline is disabled in this API image. "
+                "In-process custom YOLOv8 pipeline is disabled in this API image. "
                 "Use `docker compose --profile live up --build` for raw CCTV processing."
             ),
         )
@@ -150,7 +230,7 @@ async def process_all_videos(request: VideoProcessAllRequest) -> VideoJobRespons
         raise HTTPException(
             status_code=503,
             detail=(
-                "In-process YOLOE pipeline is disabled in this API image. "
+                "In-process custom YOLOv8 pipeline is disabled in this API image. "
                 "Use `docker compose --profile live up --build` for raw CCTV processing."
             ),
         )
@@ -169,13 +249,66 @@ async def video_job(job_id: str) -> VideoJobResponse:
 
 
 @app.get("/media/cameras/{camera_id}.mp4")
-async def camera_video(camera_id: str) -> FileResponse:
-    if camera_id not in CAMERA_VIDEO_FILES:
+async def camera_video(camera_id: str, request: Request = None, clip_set: str = "sample") -> Response:
+    camera_files = _camera_files_for_clip_set(clip_set)
+    if camera_id not in camera_files:
         raise HTTPException(status_code=404, detail="Unknown camera_id")
-    path = settings.cctv_dir_path / CAMERA_VIDEO_FILES[camera_id]
+    path = _browser_video_path(clip_set, camera_id, camera_files[camera_id])
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Camera video not found: {camera_id}")
-    return FileResponse(path, media_type="video/mp4")
+    return _video_response(path, request.headers.get("range") if request else None)
+
+
+def _video_response(path: Path, range_header: str | None) -> Response:
+    file_size = path.stat().st_size
+    headers = {"Accept-Ranges": "bytes"}
+    if not range_header:
+        headers["Content-Length"] = str(file_size)
+        return StreamingResponse(
+            _iter_file_range(path, 0, file_size - 1),
+            media_type="video/mp4",
+            headers=headers,
+        )
+
+    try:
+        unit, value = range_header.split("=", 1)
+        if unit.strip().lower() != "bytes":
+            raise ValueError
+        start_text, end_text = value.split("-", 1)
+        start = int(start_text) if start_text else 0
+        end = int(end_text) if end_text else file_size - 1
+        start = max(0, start)
+        end = min(file_size - 1, end)
+        if start > end:
+            raise ValueError
+    except ValueError:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
+
+    content_length = end - start + 1
+    headers.update(
+        {
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Content-Length": str(content_length),
+        }
+    )
+    return StreamingResponse(
+        _iter_file_range(path, start, end),
+        status_code=206,
+        media_type="video/mp4",
+        headers=headers,
+    )
+
+
+def _iter_file_range(path: Path, start: int, end: int, chunk_size: int = 1024 * 1024):
+    with path.open("rb") as handle:
+        handle.seek(start)
+        remaining = end - start + 1
+        while remaining > 0:
+            chunk = handle.read(min(chunk_size, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
 
 
 @app.post("/events/ingest", response_model=IngestResponse)
@@ -221,13 +354,14 @@ async def ingest_events(request: Request, body: Any = Body(...)) -> IngestRespon
 
 @app.get("/stores/{id}/metrics")
 async def metrics(id: str) -> dict[str, Any]:
-    return compute_metrics(id)
+    return await run_in_threadpool(compute_metrics, id)
 
 
 @app.get("/stores/{id}/events")
 async def recent_events(id: str, limit: int = 10) -> dict[str, Any]:
+    rows = await run_in_threadpool(fetch_recent_events, id, limit)
     events = []
-    for row in fetch_recent_events(id, limit):
+    for row in rows:
         events.append(
             {
                 "event_id": row["event_id"],
@@ -248,6 +382,23 @@ async def recent_events(id: str, limit: int = 10) -> dict[str, Any]:
 
 @app.get("/stores/{id}/live")
 async def live_snapshot(id: str, limit: int = 8) -> dict[str, Any]:
+    return await run_in_threadpool(_live_snapshot_cached, id, limit)
+
+
+def _live_snapshot_cached(id: str, limit: int = 8) -> dict[str, Any]:
+    safe_limit = max(1, min(limit, 2000))
+    cache_key = (id, safe_limit)
+    now = time.monotonic()
+    with _live_cache_lock:
+        cached = _live_cache.get(cache_key)
+        if cached and now - cached[0] < _LIVE_CACHE_TTL_SECONDS:
+            return cached[1]
+        snapshot = _live_snapshot_sync(id, safe_limit)
+        _live_cache[cache_key] = (time.monotonic(), snapshot)
+        return snapshot
+
+
+def _live_snapshot_sync(id: str, limit: int = 8) -> dict[str, Any]:
     events = []
     for row in fetch_recent_events(id, limit):
         events.append(
@@ -265,35 +416,40 @@ async def live_snapshot(id: str, limit: int = 8) -> dict[str, Any]:
                 "metadata": json.loads(row["metadata_json"]),
             }
         )
+    analytics = compute_live_analytics(id)
     return {
         "store_id": id,
         "event_count": count_events(id),
         "last_event_timestamp": latest_event_timestamp(id),
-        "metrics": compute_metrics(id),
-        "funnel": compute_funnel(id),
-        "heatmap": compute_heatmap(id),
-        "anomalies": compute_anomalies(id),
+        "metrics": analytics["metrics"],
+        "funnel": analytics["funnel"],
+        "heatmap": analytics["heatmap"],
+        "anomalies": analytics["anomalies"],
         "recent_events": events,
     }
 
 
 @app.get("/stores/{id}/funnel")
 async def funnel(id: str) -> dict[str, Any]:
-    return compute_funnel(id)
+    return await run_in_threadpool(compute_funnel, id)
 
 
 @app.get("/stores/{id}/heatmap")
 async def heatmap(id: str) -> dict[str, Any]:
-    return compute_heatmap(id)
+    return await run_in_threadpool(compute_heatmap, id)
 
 
 @app.get("/stores/{id}/anomalies")
 async def anomalies(id: str) -> dict[str, Any]:
-    return compute_anomalies(id)
+    return await run_in_threadpool(compute_anomalies, id)
 
 
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
+    return await run_in_threadpool(_health_sync)
+
+
+def _health_sync() -> HealthResponse:
     db_ok = check_database()
     latest_by_store = latest_event_timestamp_by_store() if db_ok else {}
     warnings: list[dict[str, Any]] = []

@@ -2,7 +2,10 @@ __pycache__/
 .pytest_cache/
 .test_tmp/
 .coverage
+.coverage.*
 htmlcov/
+.tmp/
+pytest-cache-files-*/
 .venv/
 venv/
 data/
@@ -12,6 +15,7 @@ data/
 runs/
 models/*.pt
 *.pt
+!models/best.pt
 mobileclip*.ts
 events.jsonl
 generated_events.jsonl

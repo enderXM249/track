@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import csv
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.storage import init_db, insert_pos_transactions
 from app.time_utils import to_iso_z
 
 
 def _parse_pos_timestamp(date_text: str, time_text: str) -> str:
-    local = ZoneInfo("Asia/Kolkata")
+    try:
+        local = ZoneInfo("Asia/Kolkata")
+    except ZoneInfoNotFoundError:
+        local = timezone(timedelta(hours=5, minutes=30), "IST")
     dt = datetime.strptime(f"{date_text} {time_text}", "%d-%m-%Y %H:%M:%S")
     return to_iso_z(dt.replace(tzinfo=local).astimezone(UTC)) or ""
 

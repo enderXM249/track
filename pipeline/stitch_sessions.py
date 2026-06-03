@@ -32,6 +32,8 @@ class TrackSummary:
     events: list[dict[str, Any]]
     zones: set[str] = field(default_factory=set)
     is_staff: bool = False
+    staff_event_count: int = 0
+    non_staff_event_count: int = 0
     has_entry: bool = False
     has_exit: bool = False
     start_center: tuple[float, float] | None = None
@@ -81,6 +83,8 @@ def summarize_tracks(events: list[dict[str, Any]]) -> list[TrackSummary]:
         last_ts = parse_ts(rows[-1]["timestamp"])
         start_center = _center(rows[0])
         end_center = _center(rows[-1])
+        staff_event_count = sum(1 for row in rows if row.get("is_staff"))
+        non_staff_event_count = len(rows) - staff_event_count
         summaries.append(
             TrackSummary(
                 key=key,
@@ -90,7 +94,9 @@ def summarize_tracks(events: list[dict[str, Any]]) -> list[TrackSummary]:
                 last_ts=last_ts,
                 events=rows,
                 zones={row["zone_id"] for row in rows if row.get("zone_id")},
-                is_staff=any(row.get("is_staff") for row in rows),
+                is_staff=staff_event_count > non_staff_event_count,
+                staff_event_count=staff_event_count,
+                non_staff_event_count=non_staff_event_count,
                 has_entry=any(row["event_type"] == "ENTRY" for row in rows),
                 has_exit=any(row["event_type"] == "EXIT" for row in rows),
                 start_center=start_center,

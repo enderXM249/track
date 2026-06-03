@@ -130,6 +130,7 @@ def _run_single_video_job(
             confidence_threshold=request.confidence_threshold,
             inference_imgsz=request.imgsz,
             tracking_backend=request.tracker,
+            clip_set=request.clip_set,
         )
         events_written = processor.run()
         if settings.pos_csv_path.exists():
@@ -173,6 +174,7 @@ def _run_all_videos_job(
             tracking_backend=request.tracker,
             pos_csv=settings.pos_csv_path if settings.pos_csv_path.exists() else None,
             stitch=request.stitch,
+            clip_set=request.clip_set,
         )
         events_written = int(
             result.get("enriched_events")

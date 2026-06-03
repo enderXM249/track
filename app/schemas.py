@@ -10,6 +10,7 @@ from app.time_utils import parse_timestamp, to_iso_z
 
 
 class EventType(StrEnum):
+    DETECTION = "DETECTION"
     ENTRY = "ENTRY"
     EXIT = "EXIT"
     ZONE_ENTER = "ZONE_ENTER"
@@ -70,12 +71,13 @@ class VideoProcessRequest(BaseModel):
     video_path: str | None = None
     store_id: str = "STORE_BLR_002"
     camera_id: str = "CAM_1"
-    model: str = "yoloe-26s-seg.pt"
+    model: str = "models/best.pt"
+    clip_set: str = "sample"
     clip_start: datetime
     frame_stride: int = Field(default=10, ge=1, le=300)
     confidence_threshold: float = Field(default=0.05, ge=0.0, le=1.0)
     imgsz: int = Field(default=960, ge=320, le=1920)
-    tracker: str = Field(default="botsort", pattern="^(botsort|bytetrack|centroid)$")
+    tracker: str = Field(default="bytetrack", pattern="^(botsort|bytetrack|centroid)$")
     ingest: bool = True
 
     @field_validator("clip_start", mode="before")
@@ -91,12 +93,13 @@ class VideoProcessRequest(BaseModel):
 class VideoProcessAllRequest(BaseModel):
     video_dir: str | None = None
     store_id: str = "STORE_BLR_002"
-    model: str = "yoloe-26s-seg.pt"
+    model: str = "models/best.pt"
+    clip_set: str = "sample"
     clip_start: datetime
     frame_stride: int = Field(default=10, ge=1, le=300)
     confidence_threshold: float = Field(default=0.05, ge=0.0, le=1.0)
     imgsz: int = Field(default=960, ge=320, le=1920)
-    tracker: str = Field(default="botsort", pattern="^(botsort|bytetrack|centroid)$")
+    tracker: str = Field(default="bytetrack", pattern="^(botsort|bytetrack|centroid)$")
     stitch: bool = True
     ingest: bool = True
 

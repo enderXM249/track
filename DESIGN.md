@@ -8,9 +8,9 @@ The main runtime is a FastAPI service backed by SQLite. SQLite was chosen becaus
 
 The data flow is:
 
-1. CCTV clips are processed by `pipeline.run_all` using YOLOE-26 person detection.
+1. CCTV clips are processed by `pipeline.run_all` using the custom YOLOv8 `models/best.pt` staff/customer detector.
 2. The detection pipeline emits JSONL events using the required schema.
-3. `pipeline.live_replay` or the Docker `yoloe-live` service posts those events to `POST /events/ingest`.
+3. `pipeline.live_replay` or the Docker `custom-yolo-live` service posts those events to `POST /events/ingest`.
 4. The API validates each event with Pydantic, deduplicates by `event_id`, and stores accepted events.
 5. Analytics modules compute metrics, funnel, heatmap, anomalies, and health directly from stored events and POS rows.
 
@@ -18,7 +18,7 @@ The web dashboard is served by the same FastAPI application at `/dashboard`. It 
 
 ## Detection Design
 
-The detection pipeline supports a real YOLOE-26 path and a sample path. The production demo default is `yoloe-26s-seg.pt`, loaded through Ultralytics YOLOE with the text prompt restricted to `person`. This replaced the weak custom `models/best.pt` path for the main demo while keeping optional custom-model support for later comparisons. Tracking uses a lightweight centroid tracker in this repository. This is intentionally simple and explainable: it assigns stable camera-local track IDs, maps each person to zones, and uses zone transitions to emit `ZONE_ENTER`, `ZONE_EXIT`, and `ZONE_DWELL`.
+The detection pipeline supports a real custom YOLOv8 path and a sample path. The production demo default is `models/best.pt`, loaded through Ultralytics YOLO. The model has two classes, `customer` and `staff`, so staff exclusion is produced by the detector itself instead of a post-hoc clothing heuristic. Tracking defaults to ByteTrack through Ultralytics `model.track(...)`, with a centroid fallback only for dependency-light tests. The tracker assigns stable camera-local track IDs, maps each detection to zones, and uses zone transitions to emit `ZONE_ENTER`, `ZONE_EXIT`, and `ZONE_DWELL`.
 
 After all cameras are processed, `pipeline/stitch_sessions.py` converts camera-local visitor IDs such as `VIS_CAM_3_00001` into anonymous store-level session IDs such as `VIS_70594640`. The stitcher uses camera route order, event time gaps, zone context, and track-fragment guards. It preserves the original local ID in event metadata as `pre_stitch_visitor_id` and `camera_visitor_id`, so the reviewer can audit how a session was assembled.
 
@@ -26,7 +26,7 @@ The detection layer now keeps evaluating the entry threshold after the first ent
 
 Zone mapping is rule based. The config file defines camera IDs, normalized polygons, and an entry threshold line. A detected person's bottom-center point is mapped into a polygon. This makes the approach auditable and easy to tune for the provided store layout. It also avoids depending on a VLM for every frame, which would be slower, costly, and harder to reproduce during evaluation.
 
-Staff/customer identity is anonymous role classification, not face identity. The detector emits person boxes only; `pipeline/staff.py` adds `person_role`, `role_confidence`, and `role_source` metadata from transparent cues such as purple/magenta uniform-like torso regions, service/billing camera hints, and weak head-region sharpness support. The stitcher uses majority staff evidence rather than allowing one weak staff event to mark an entire session. The intended next step is to replace this with a small crop classifier trained on staff/customer person crops.
+Staff/customer identity is anonymous role classification, not face identity. The custom detector emits `customer` or `staff` boxes directly; the pipeline stores that as `is_staff`, `metadata.person_role`, `metadata.custom_class_name`, and `metadata.role_source=custom_yolov8_class`. The stitcher uses majority staff evidence rather than allowing one weak staff event to mark an entire session. The OSNet Re-ID upgrade point is the cross-camera stitching layer: an embedding matcher can replace the current route/time/zone baseline while preserving the public event schema.
 
 ## API Design
 

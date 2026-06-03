@@ -8,11 +8,11 @@ from typing import Any
 
 from app.schemas import EventType
 from pipeline.emit import JsonlEmitter, build_event
-from pipeline.staff import classify_person_role
+from pipeline.reid import OSNetReIdentifier
 from pipeline.tracker import CentroidTracker, Detection, Track
 from pipeline.zones import ZoneMapper
 
-DEFAULT_DETECTOR_MODEL = "yoloe-26s-seg.pt"
+DEFAULT_DETECTOR_MODEL = "models/best.pt"
 
 
 @dataclass
@@ -33,6 +33,7 @@ class TrackState:
     role_confidence: float = 0.62
     role_source: str = "default_customer_when_no_staff_signal"
     role_signals: dict[str, float | bool | str] = field(default_factory=dict)
+    reid_method: str = "not_computed"
 
 
 @dataclass
@@ -47,10 +48,13 @@ class VideoProcessor:
     frame_stride: int = 5
     confidence_threshold: float = 0.05
     inference_imgsz: int = 960
-    tracking_backend: str = "botsort"
+    tracking_backend: str = "bytetrack"
+    clip_set: str = "sample"
     states: dict[int, TrackState] = field(default_factory=dict)
     model_source_name: str = DEFAULT_DETECTOR_MODEL
-    uses_open_vocab_detector: bool = True
+    uses_open_vocab_detector: bool = False
+    class_names: dict[int, str] = field(default_factory=dict)
+    reid: OSNetReIdentifier = field(default_factory=OSNetReIdentifier)
 
     def run(self) -> int:
         try:
@@ -59,13 +63,14 @@ class VideoProcessor:
         except ImportError as exc:
             raise RuntimeError(
                 "Detection requires requirements-pipeline.txt. Install it with "
-                "`pip install -r requirements-pipeline.txt` or run pipeline sample mode."
+                "`pip install -r requirements-pipeline.txt`. In Docker, also ensure "
+                "Dockerfile.pipeline installs the OpenCV runtime libraries such as libxcb1."
             ) from exc
 
         model_source = self._resolve_model_source(self.model_path)
         self.model_source_name = model_source
-        self.uses_open_vocab_detector = "yoloe" in model_source.lower()
         model = self._load_model(model_source, YOLO)
+        self.class_names = self._model_class_names(model)
         cap = cv2.VideoCapture(str(self.video_path))
         if not cap.isOpened():
             raise RuntimeError(f"Could not open video: {self.video_path}")
@@ -90,6 +95,9 @@ class VideoProcessor:
                     continue
 
                 timestamp = self.clip_start + timedelta(seconds=frame_index / fps)
+                self._last_frame_index = frame_index
+                self._last_frame_time_sec = frame_index / fps
+                self._last_fps = fps
                 detections = [
                     detection
                     for detection in self._detect_people(model, frame)
@@ -144,9 +152,6 @@ class VideoProcessor:
             "imgsz": self.inference_imgsz,
             "agnostic_nms": True,
         }
-        if not self.uses_open_vocab_detector:
-            predict_args["classes"] = [0]
-
         if self.tracking_backend != "centroid" and hasattr(model, "track"):
             tracker_name = (
                 "bytetrack.yaml" if self.tracking_backend == "bytetrack" else "botsort.yaml"
@@ -162,9 +167,11 @@ class VideoProcessor:
             results = predict(frame, **predict_args)
         detections: list[Detection] = []
         for result in results:
+            result_names = self._result_class_names(result)
             for box in result.boxes:
                 conf = float(box.conf[0])
                 x1, y1, x2, y2 = [float(value) for value in box.xyxy[0].tolist()]
+                class_id = int(box.cls[0]) if getattr(box, "cls", None) is not None else 0
                 track_id = None
                 if getattr(box, "id", None) is not None:
                     track_id = int(box.id[0])
@@ -172,6 +179,8 @@ class VideoProcessor:
                     Detection(
                         bbox=(x1, y1, x2, y2),
                         confidence=conf,
+                        class_id=class_id,
+                        class_name=result_names.get(class_id) or self.class_names.get(class_id),
                         track_id=track_id,
                     )
                 )
@@ -179,40 +188,33 @@ class VideoProcessor:
 
     @staticmethod
     def _load_model(model_source: str, yolo_cls: Any) -> Any:
-        if "yoloe" not in model_source.lower():
-            return yolo_cls(model_source)
-
-        try:
-            from ultralytics import YOLOE
-        except ImportError:
-            model = yolo_cls(model_source)
-        else:
-            model = YOLOE(model_source)
-
-        # YOLOE is promptable/open-vocabulary. Restricting it to "person" keeps the
-        # challenge detector focused and lets downstream tracking/staff logic stay the same.
-        for method_name in ("set_classes", "set_vocab"):
-            method = getattr(model, method_name, None)
-            if not method:
-                continue
-            try:
-                if method_name == "set_vocab":
-                    method(["person"], ["person"])
-                else:
-                    method(["person"])
-                break
-            except Exception:
-                continue
-        return model
+        return yolo_cls(model_source)
 
     @staticmethod
     def _resolve_model_source(model_path: Path) -> str:
         if model_path.exists():
             return str(model_path)
-        # Allow Ultralytics built-in/downloadable weight names such as yoloe-26s-seg.pt.
-        if len(model_path.parts) == 1 and model_path.suffix == ".pt":
-            return str(model_path)
-        return DEFAULT_DETECTOR_MODEL
+        default_path = Path(DEFAULT_DETECTOR_MODEL)
+        if default_path.exists():
+            return str(default_path)
+        raise FileNotFoundError(
+            f"Custom YOLOv8 detector not found: {model_path}. "
+            f"Place your trained staff/customer weights at {DEFAULT_DETECTOR_MODEL}."
+        )
+
+    @staticmethod
+    def _model_class_names(model: Any) -> dict[int, str]:
+        names = getattr(model, "names", {}) or {}
+        if isinstance(names, dict):
+            return {int(key): str(value) for key, value in names.items()}
+        return {index: str(value) for index, value in enumerate(names)}
+
+    @staticmethod
+    def _result_class_names(result: Any) -> dict[int, str]:
+        names = getattr(result, "names", {}) or {}
+        if isinstance(names, dict):
+            return {int(key): str(value) for key, value in names.items()}
+        return {index: str(value) for index, value in enumerate(names)}
 
     def _events_for_track(
         self,
@@ -235,23 +237,34 @@ class VideoProcessor:
         y_norm = y / height
         state.last_bbox = detection.bbox
         state.last_center_norm = (x_norm, y_norm)
-        role = classify_person_role(
-            frame,
-            detection.bbox,
-            camera_id=self.camera_id,
-            center_norm=(x_norm, y_norm),
-        )
-        state.is_staff = role.is_staff
-        state.role_label = role.label
-        state.role_confidence = role.confidence
-        state.role_source = role.source
-        state.role_signals = role.signals
+        role_label = (detection.class_name or "").strip().lower()
+        state.is_staff = role_label == "staff"
+        state.role_label = "staff" if state.is_staff else "customer"
+        state.role_confidence = detection.confidence
+        state.role_source = "custom_yolov8_class"
+        state.role_signals = {
+            "custom_class_id": detection.class_id,
+            "custom_class_name": detection.class_name or "unknown",
+        }
+        descriptor = self.reid.describe(frame, detection.bbox)
+        self.reid.remember(state.visitor_id, descriptor, timestamp)
+        state.reid_method = descriptor.method if descriptor is not None else self.reid.method
         zone = zones.zone_for_point(self.camera_id, x_norm, y_norm)
         zone_id = zone.zone_id if zone else None
         events: list[dict[str, Any]] = []
-        confidence = min(
-            detection.confidence,
-            role.confidence if role.is_staff else detection.confidence,
+        confidence = detection.confidence
+        events.append(
+            self._event(
+                state,
+                EventType.DETECTION,
+                timestamp,
+                zone_id,
+                0,
+                confidence,
+                queue_depth=queue_depth if zone_id and "BILL" in zone_id.upper() else None,
+                sku_zone=zone.sku_zone if zone else None,
+                increment_session=False,
+            )
         )
 
         entry_line = zones.entry_line(self.camera_id)
@@ -346,8 +359,10 @@ class VideoProcessor:
         confidence: float,
         queue_depth: int | None = None,
         sku_zone: str | None = None,
+        increment_session: bool = True,
     ) -> dict[str, Any]:
-        state.session_seq += 1
+        if increment_session:
+            state.session_seq += 1
         return build_event(
             store_id=self.store_id,
             camera_id=self.camera_id,
@@ -375,17 +390,29 @@ class VideoProcessor:
                 "frame_height": round(float(self._last_frame_height), 2)
                 if hasattr(self, "_last_frame_height")
                 else None,
+                "frame_index": int(self._last_frame_index)
+                if hasattr(self, "_last_frame_index")
+                else None,
+                "frame_time_sec": round(float(self._last_frame_time_sec), 4)
+                if hasattr(self, "_last_frame_time_sec")
+                else None,
+                "fps": round(float(self._last_fps), 4)
+                if hasattr(self, "_last_fps")
+                else None,
                 "person_role": state.role_label,
                 "role_confidence": round(state.role_confidence, 4),
                 "role_source": state.role_source,
                 "role_signals": state.role_signals,
                 "detector_model": self.model_source_name,
-                "detector_family": "YOLOE-26"
-                if "yoloe-26" in self.model_source_name.lower()
-                else "YOLO",
-                "detector_prompt": ["person"] if self.uses_open_vocab_detector else None,
+                "detector_family": "YOLOv8-custom-staff-customer",
+                "detector_classes": list(self.class_names.values()) or ["customer", "person", "staff"],
+                "custom_class_id": state.role_signals.get("custom_class_id"),
+                "custom_class_name": state.role_signals.get("custom_class_name"),
                 "inference_imgsz": self.inference_imgsz,
                 "tracking_backend": self.tracking_backend,
+                "reid_method": state.reid_method,
+                "session_stitching_method": "cross_camera_time_route_zone",
+                "clip_set": self.clip_set,
             },
         )
 
@@ -413,7 +440,7 @@ def main() -> None:
     parser.add_argument("--frame-stride", type=int, default=5)
     parser.add_argument("--imgsz", type=int, default=960)
     parser.add_argument("--conf", type=float, default=0.05)
-    parser.add_argument("--tracker", choices=["botsort", "bytetrack", "centroid"], default="botsort")
+    parser.add_argument("--tracker", choices=["botsort", "bytetrack", "centroid"], default="bytetrack")
     args = parser.parse_args()
 
     clip_start = datetime.fromisoformat(args.clip_start.replace("Z", "+00:00")).astimezone(UTC)

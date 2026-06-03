@@ -24,7 +24,7 @@ class Settings:
     app_name: str = os.getenv("APP_NAME", "Store Intelligence API")
     db_path: Path = Path(os.getenv("APP_DB_PATH", "data/store_intelligence.db"))
     pos_csv_path: Path = Path(
-        os.getenv("POS_CSV_PATH", "Brigade_Bangalore_10_April_26 (1)bc6219c.csv")
+        os.getenv("POS_CSV_PATH", "POS - sample transactionsb1e826f.csv")
     )
     store_layout_path: Path = Path(os.getenv("STORE_LAYOUT_PATH", "config/store_layout.json"))
     cctv_dir_path: Path = Path(

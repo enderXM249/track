@@ -1,12 +1,19 @@
 __pycache__/
 .pytest_cache/
 .test_tmp/
+.tmp/
+.coverage
+.coverage.*
+pytest-cache-files-*/
+pytest-cache-files-*
 .venv/
 venv/
 data/
 runs/
-models/
+models/*
+!models/best.pt
 *.pt
+!models/best.pt
 mobileclip*.ts
 CCTV Footage/
 sample_data/store-intelligence-videos/*.mp4

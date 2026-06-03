@@ -141,7 +141,7 @@ def fetch_recent_events(
     limit: int = 10,
     db_path: Path | None = None,
 ) -> list[sqlite3.Row]:
-    safe_limit = max(1, min(limit, 100))
+    safe_limit = max(1, min(limit, 2000))
     store_ids = _store_ids_for_query(store_id)
     with connect(db_path) as conn:
         return list(

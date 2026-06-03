@@ -185,10 +185,56 @@ def dashboard_html() -> str:
       background: var(--stage);
       display: block;
     }
+    .video-fallback {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 18px;
+      background:
+        linear-gradient(rgba(15, 23, 42, 0.08) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(15, 23, 42, 0.08) 1px, transparent 1px),
+        radial-gradient(circle at 32% 36%, rgba(15, 118, 110, 0.18), transparent 30%),
+        radial-gradient(circle at 70% 62%, rgba(37, 99, 235, 0.15), transparent 26%),
+        #dfe8ee;
+      background-size: 44px 44px, 44px 44px, auto, auto, auto;
+      color: #0f172a;
+      z-index: 1;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 180ms ease;
+    }
+    .video-shell.video-unavailable .video-fallback {
+      opacity: 1;
+    }
+    .video-shell.video-unavailable video {
+      opacity: 0.08;
+    }
+    .fallback-card {
+      max-width: 460px;
+      border-radius: 8px;
+      border: 1px solid rgba(15, 23, 42, 0.16);
+      background: rgba(255, 255, 255, 0.86);
+      box-shadow: var(--shadow);
+      padding: 14px 16px;
+      text-align: center;
+    }
+    .fallback-card strong {
+      display: block;
+      margin-bottom: 5px;
+      font-size: 15px;
+    }
+    .fallback-card span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.42;
+    }
     .overlay {
       position: absolute;
       inset: 0;
       pointer-events: none;
+      z-index: 2;
     }
     .box {
       position: absolute;
@@ -228,6 +274,7 @@ def dashboard_html() -> str:
       gap: 6px;
       color: #fff;
       font-size: 12px;
+      z-index: 3;
     }
     .hud span {
       display: inline-flex;
@@ -247,6 +294,7 @@ def dashboard_html() -> str:
       color: #dbeafe;
       font-size: 12px;
       line-height: 1.35;
+      z-index: 3;
     }
     .side-stack {
       display: grid;
@@ -412,10 +460,11 @@ def dashboard_html() -> str:
   <header>
     <div>
       <h1>Store Intelligence Live Dashboard</h1>
-      <div class="sub">YOLOE-26 CCTV detection, staff/customer role overlays, and metrics from API-ingested events.</div>
+      <div class="sub">Custom YOLOv8 staff/customer detection, ByteTrack tracking, Re-ID stitching, and metrics from API-ingested events.</div>
     </div>
     <div class="controls">
       <input id="storeId" value="STORE_BLR_002" aria-label="Store ID">
+      <select id="clipSet" aria-label="CCTV footage set"></select>
       <button id="startPipeline">Start CCTV Pipeline</button>
       <button id="refresh">Refresh</button>
       <span class="status"><span id="dot" class="dot"></span><span id="statusText">Connecting</span></span>
@@ -438,8 +487,9 @@ def dashboard_html() -> str:
             <label class="overlay-controls">
               Min conf
               <select id="minConfidence">
+                <option value="0.05" selected>0.05</option>
                 <option value="0.25">0.25</option>
-                <option value="0.50" selected>0.50</option>
+                <option value="0.50">0.50</option>
                 <option value="0.70">0.70</option>
               </select>
             </label>
@@ -448,6 +498,12 @@ def dashboard_html() -> str:
         </div>
         <div class="video-shell">
           <video id="cctvVideo" autoplay muted loop playsinline controls></video>
+          <div id="videoFallback" class="video-fallback">
+            <div class="fallback-card">
+              <strong id="fallbackTitle">Detection overlay feed</strong>
+              <span id="fallbackText">The browser is loading the CCTV clip. Live API detections remain visible here.</span>
+            </div>
+          </div>
           <div id="overlay" class="overlay"></div>
           <div class="camera-note">Overlay boxes are recent detections stored by the API. They are filtered and de-duplicated for demo readability.</div>
           <div class="hud">
@@ -466,7 +522,7 @@ def dashboard_html() -> str:
         <div class="metric wide">
           <div class="label">Model Signal Quality</div>
           <div id="qualitySummary" class="value">-</div>
-          <div id="detectorModel" class="sub">waiting for YOLOE-26 events</div>
+          <div id="detectorModel" class="sub">waiting for custom YOLOv8 events</div>
           <div class="quality">
             <div class="quality-row"><span>Avg conf</span><div class="quality-track"><span id="avgConfBar" style="width:0%"></span></div><strong id="avgConfText">0</strong></div>
             <div class="quality-row"><span>Staff roles</span><div class="quality-track"><span id="staffBar" style="width:0%"></span></div><strong id="staffText">0</strong></div>
@@ -501,12 +557,19 @@ def dashboard_html() -> str:
   <script>
     const state = {
       storeId: "STORE_BLR_002",
+      selectedClipSet: "store1",
       selectedCamera: "CAM_3",
       cameras: [],
+      clipSets: [],
       currentJobId: null,
       previousEventCount: null,
       pulseUntil: 0,
-      lastEvents: []
+      lastEvents: [],
+      eventTimeline: [],
+      clipStartByCamera: {},
+      lastOverlayRenderAt: 0,
+      dashboardLoading: false,
+      timelineLoading: false
     };
 
     function fmtPercent(value) {
@@ -526,15 +589,129 @@ def dashboard_html() -> str:
       return (event.metadata && event.metadata.person_role) || (event.is_staff ? "staff" : "customer");
     }
 
+    function modelRole(event) {
+      const metadata = event.metadata || {};
+      return metadata.custom_class_name || metadata.local_person_role || personRole(event);
+    }
+
+    function eventClipSet(event) {
+      return (event.metadata && event.metadata.clip_set) || "sample";
+    }
+
+    function matchesSelectedClipSet(event) {
+      const clipSet = eventClipSet(event);
+      if (clipSet === state.selectedClipSet) return true;
+      return !event.metadata?.clip_set && ["sample", "store1"].includes(state.selectedClipSet);
+    }
+
     function detectorModel(events) {
       const event = events.find(item => item.metadata && item.metadata.detector_model);
       return event ? event.metadata.detector_model : "unknown detector";
     }
 
+    function eventMillis(event) {
+      return new Date(event.timestamp).getTime();
+    }
+
+    function eventVideoSeconds(event) {
+      const value = event.metadata && event.metadata.frame_time_sec;
+      const seconds = Number(value);
+      return Number.isFinite(seconds) ? seconds : null;
+    }
+
+    function rebuildTimeline(events) {
+      state.eventTimeline = [...events].sort((a, b) => eventMillis(a) - eventMillis(b));
+      state.clipStartByCamera = {};
+      state.eventTimeline.forEach(event => {
+        if (!event.camera_id || !(event.metadata && (event.metadata.bbox_xyxy || event.metadata.center_norm))) return;
+        const ts = eventMillis(event);
+        if (!state.clipStartByCamera[event.camera_id] || ts < state.clipStartByCamera[event.camera_id]) {
+          state.clipStartByCamera[event.camera_id] = ts;
+        }
+      });
+    }
+
+    function syncedCameraEvents(events) {
+      const selectedCamera = state.cameras.find(c => c.camera_id === state.selectedCamera);
+      const detectionFilter = (selectedCamera && selectedCamera.detection_filter) || {};
+      const video = document.getElementById("cctvVideo");
+      const minConfidence = Number(document.getElementById("minConfidence").value) || 0;
+      const clipStart = state.clipStartByCamera[state.selectedCamera];
+      const cameraEvents = events
+        .filter(event => event.camera_id === state.selectedCamera)
+        .filter(matchesSelectedClipSet)
+        .filter(event => (Number(event.confidence) || 0) >= minConfidence)
+        .filter(event => passesDetectionFilter(event, detectionFilter))
+        .filter(event => event.metadata && (event.metadata.bbox_xyxy || event.metadata.center_norm))
+        .sort((a, b) => eventMillis(a) - eventMillis(b));
+
+      if (!cameraEvents.length) return [];
+      if (!Number.isFinite(video.currentTime)) {
+        return latestEventsByVisitor(cameraEvents).slice(0, 6);
+      }
+
+      const frameTimedEvents = cameraEvents.filter(event => eventVideoSeconds(event) !== null);
+      if (frameTimedEvents.length) {
+        const targetSec = video.currentTime;
+        const candidates = frameTimedEvents.filter(event => Math.abs(eventVideoSeconds(event) - targetSec) <= 1.8);
+        if (candidates.length) {
+          return latestEventsByVisitor(candidates).slice(0, 8);
+        }
+        const nearest = [];
+        const latestBeforeByVisitor = new Map();
+        frameTimedEvents.forEach(event => {
+          const eventSec = eventVideoSeconds(event);
+          if (eventSec !== null && eventSec <= targetSec) {
+            latestBeforeByVisitor.set(event.metadata.camera_visitor_id || event.visitor_id, event);
+          }
+        });
+        latestBeforeByVisitor.forEach(event => {
+          const eventSec = eventVideoSeconds(event);
+          if (eventSec !== null && targetSec - eventSec <= 4.0) nearest.push(event);
+        });
+        return nearest.slice(0, 8);
+      }
+
+      if (!clipStart) {
+        return latestEventsByVisitor(cameraEvents).slice(0, 6);
+      }
+
+      const targetMs = clipStart + (video.currentTime * 1000);
+      const windowMs = 2500;
+      const candidates = cameraEvents.filter(event => Math.abs(eventMillis(event) - targetMs) <= windowMs);
+      if (candidates.length) {
+        return latestEventsByVisitor(candidates).slice(0, 6);
+      }
+
+      const nearest = [];
+      const latestBeforeByVisitor = new Map();
+      cameraEvents.forEach(event => {
+        if (eventMillis(event) <= targetMs) {
+          latestBeforeByVisitor.set(event.metadata.camera_visitor_id || event.visitor_id, event);
+        }
+      });
+      latestBeforeByVisitor.forEach(event => {
+        if (targetMs - eventMillis(event) <= 8000) nearest.push(event);
+      });
+      return nearest.slice(0, 6);
+    }
+
+    function latestEventsByVisitor(events) {
+      const latestByVisitor = new Map();
+      events.forEach(event => {
+        const key = event.metadata.camera_visitor_id || event.visitor_id;
+        const existing = latestByVisitor.get(key);
+        if (!existing || eventMillis(event) > eventMillis(existing)) latestByVisitor.set(key, event);
+      });
+      return Array.from(latestByVisitor.values()).sort((a, b) => eventMillis(b) - eventMillis(a));
+    }
+
     async function loadCameras() {
-      const response = await fetch("/media/cameras", { cache: "no-store" });
+      const response = await fetch(`/media/cameras?clip_set=${encodeURIComponent(state.selectedClipSet)}`, { cache: "no-store" });
       const data = await response.json();
+      state.clipSets = data.clip_sets || [];
       state.cameras = data.cameras || [];
+      renderClipSetSelect();
       if (!state.cameras.some(c => c.camera_id === state.selectedCamera && c.available)) {
         const firstAvailable = state.cameras.find(c => c.available);
         if (firstAvailable) state.selectedCamera = firstAvailable.camera_id;
@@ -543,24 +720,37 @@ def dashboard_html() -> str:
       setVideoSource();
     }
 
+    function renderClipSetSelect() {
+      const select = document.getElementById("clipSet");
+      if (!state.clipSets.length) {
+        select.innerHTML = `<option value="sample">Sample CCTV</option>`;
+        return;
+      }
+      select.innerHTML = state.clipSets.map(item => {
+        const selected = item.id === state.selectedClipSet ? "selected" : "";
+        return `<option value="${item.id}" ${selected}>${item.label}</option>`;
+      }).join("");
+    }
+
     async function startPipeline() {
       state.storeId = document.getElementById("storeId").value.trim() || "STORE_BLR_002";
       const button = document.getElementById("startPipeline");
       button.disabled = true;
-      setText("jobStatus", "submitting all-camera YOLOE-26 job");
+      setText("jobStatus", "submitting all-camera custom YOLOv8 + ByteTrack job");
       try {
-        const response = await fetch("/videos/process-all", {
+      const response = await fetch("/videos/process-all", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            video_dir: "sample_data/store-intelligence-videos",
+            video_dir: state.selectedClipSet === "sample" ? "sample_data/store-intelligence-videos" : `data/clips/${state.selectedClipSet}`,
             store_id: state.storeId,
-            model: "yoloe-26s-seg.pt",
+            model: "models/best.pt",
+            clip_set: state.selectedClipSet,
             clip_start: "2026-04-10T11:20:00Z",
-            frame_stride: 10,
+            frame_stride: 5,
             confidence_threshold: 0.05,
             imgsz: 960,
-            tracker: "botsort",
+            tracker: "bytetrack",
             stitch: true,
             ingest: true
           })
@@ -595,6 +785,24 @@ def dashboard_html() -> str:
       }
     }
 
+    async function loadTrackingTimeline() {
+      if (state.timelineLoading) return;
+      state.timelineLoading = true;
+      state.storeId = document.getElementById("storeId").value.trim() || "STORE_BLR_002";
+      try {
+        const response = await fetch(`/stores/${encodeURIComponent(state.storeId)}/events?limit=5000`, { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        rebuildTimeline(data.events || []);
+      } catch (error) {
+        if (!state.eventTimeline.length) {
+          rebuildTimeline(state.lastEvents);
+        }
+      } finally {
+        state.timelineLoading = false;
+      }
+    }
+
     function renderCameraTabs() {
       const tabs = document.getElementById("cameraTabs");
       tabs.innerHTML = state.cameras.map(camera => {
@@ -614,13 +822,77 @@ def dashboard_html() -> str:
 
     function setVideoSource() {
       const camera = state.cameras.find(c => c.camera_id === state.selectedCamera);
-      if (!camera || !camera.available) return;
+      if (!camera || !camera.available) {
+        showVideoFallback("No CCTV clip found", "Detection events are still available from the API, but this camera file is not mounted.");
+        return;
+      }
       const video = document.getElementById("cctvVideo");
+      hideVideoFallback();
+      setText("cameraHud", `${camera.camera_id} CCTV feed loading`);
       if (!video.src.endsWith(camera.url)) {
         video.src = camera.url;
+        video.load();
         video.play().catch(() => {});
       }
       setText("cameraHud", `${camera.camera_id} CCTV feed`);
+      scheduleVideoReadinessCheck(video, camera);
+    }
+
+    function showVideoFallback(title, text) {
+      document.querySelector(".video-shell").classList.add("video-unavailable");
+      setText("fallbackTitle", title);
+      setText("fallbackText", text);
+    }
+
+    function hideVideoFallback() {
+      document.querySelector(".video-shell").classList.remove("video-unavailable");
+    }
+
+    function updateVideoHud(video, cameraId) {
+      if (!cameraId) return;
+      const isPlaying = video && !video.paused && video.readyState >= 2 && !video.error;
+      setText("cameraHud", isPlaying ? `${cameraId} video playing; tracking overlay live` : `${cameraId} CCTV feed`);
+    }
+
+    function scheduleVideoReadinessCheck(video, camera) {
+      const startedAt = Date.now();
+      const check = () => {
+        if (video.error) {
+          showVideoFallback(`${camera.camera_id} video decode issue`, "Chrome could not decode this MP4 quickly, so the dashboard is showing the API detection overlay feed.");
+          return;
+        }
+        if (video.readyState < 2) {
+          if (Date.now() - startedAt > 3200) {
+            setText("cameraHud", `${camera.camera_id} video loading; tracking overlay live`);
+          } else {
+            setTimeout(check, 300);
+          }
+          return;
+        }
+        hideVideoFallback();
+        updateVideoHud(video, camera.camera_id);
+      };
+      setTimeout(check, 350);
+    }
+
+    function isVideoFrameMostlyBlack(video) {
+      try {
+        if (!video.videoWidth || !video.videoHeight) return true;
+        const canvas = document.createElement("canvas");
+        canvas.width = 32;
+        canvas.height = 18;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+        let total = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          total += data[i] + data[i + 1] + data[i + 2];
+        }
+        const avg = total / (data.length / 4) / 3;
+        return avg < 18;
+      } catch (error) {
+        return true;
+      }
     }
 
     function renderFunnel(stages) {
@@ -676,7 +948,7 @@ def dashboard_html() -> str:
     function renderQuality(events) {
       if (!events.length) {
         setText("qualitySummary", "-");
-        setText("detectorModel", "waiting for YOLOE-26 events");
+        setText("detectorModel", "waiting for custom YOLOv8 events");
         setText("avgConfText", "0");
         setText("staffText", "0");
         document.getElementById("avgConfBar").style.width = "0%";
@@ -704,24 +976,11 @@ def dashboard_html() -> str:
         return;
       }
 
-      const latestByVisitor = new Map();
-      const selectedCamera = state.cameras.find(c => c.camera_id === state.selectedCamera);
-      const detectionFilter = (selectedCamera && selectedCamera.detection_filter) || {};
-      events
-        .filter(event => event.camera_id === state.selectedCamera)
-        .filter(event => (Number(event.confidence) || 0) >= minConfidence)
-        .filter(event => passesDetectionFilter(event, detectionFilter))
-        .filter(event => event.metadata && (event.metadata.bbox_xyxy || event.metadata.center_norm))
-        .forEach(event => {
-          const key = event.metadata.camera_visitor_id || event.visitor_id;
-          if (!latestByVisitor.has(key)) latestByVisitor.set(key, event);
-        });
-
-      const cameraEvents = Array.from(latestByVisitor.values()).slice(0, 5);
+      const cameraEvents = syncedCameraEvents(events);
 
       overlay.innerHTML = cameraEvents.map(event => {
         const bbox = event.metadata.bbox_xyxy;
-        const role = personRole(event);
+        const role = modelRole(event);
         const staff = role === "staff" ? "staff" : "";
         const label = `${role} ${Number(event.confidence || 0).toFixed(2)}`;
         if (Array.isArray(bbox) && bbox.length === 4) {
@@ -739,7 +998,11 @@ def dashboard_html() -> str:
         }
         return "";
       }).join("");
-      setText("detectionHud", `${cameraEvents.length} boxes above ${minConfidence.toFixed(2)} confidence`);
+      const video = document.getElementById("cctvVideo");
+      const syncText = state.clipStartByCamera[state.selectedCamera]
+        ? ` at ${video.currentTime.toFixed(1)}s`
+        : "";
+      setText("detectionHud", `${cameraEvents.length} tracked boxes${syncText} above ${minConfidence.toFixed(2)} confidence`);
     }
 
     function passesDetectionFilter(event, filter) {
@@ -757,9 +1020,11 @@ def dashboard_html() -> str:
     }
 
     async function loadDashboard() {
+      if (state.dashboardLoading) return;
+      state.dashboardLoading = true;
       state.storeId = document.getElementById("storeId").value.trim() || "STORE_BLR_002";
       try {
-        const response = await fetch(`/stores/${encodeURIComponent(state.storeId)}/live?limit=80`, { cache: "no-store" });
+        const response = await fetch(`/stores/${encodeURIComponent(state.storeId)}/live?limit=24`, { cache: "no-store" });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
         const metrics = data.metrics;
@@ -783,6 +1048,7 @@ def dashboard_html() -> str:
         renderFunnel(data.funnel.stages || []);
         renderAnomalies(data.anomalies.active_anomalies || []);
         state.lastEvents = data.recent_events || [];
+        if (!state.eventTimeline.length) rebuildTimeline(state.lastEvents);
         renderEvents(state.lastEvents);
         renderHeatmap((data.heatmap && data.heatmap.zones) || []);
         renderQuality(state.lastEvents);
@@ -793,6 +1059,8 @@ def dashboard_html() -> str:
       } catch (error) {
         document.getElementById("dot").classList.remove("live");
         setText("statusText", `Disconnected: ${error.message}`);
+      } finally {
+        state.dashboardLoading = false;
       }
     }
 
@@ -800,8 +1068,49 @@ def dashboard_html() -> str:
     document.getElementById("startPipeline").addEventListener("click", startPipeline);
     document.getElementById("showOverlay").addEventListener("change", () => renderOverlay(state.lastEvents));
     document.getElementById("minConfidence").addEventListener("change", () => renderOverlay(state.lastEvents));
-    loadCameras().then(loadDashboard).catch(loadDashboard);
-    setInterval(loadDashboard, 1500);
+    document.getElementById("clipSet").addEventListener("change", event => {
+      state.selectedClipSet = event.target.value;
+      state.selectedCamera = "";
+      loadCameras().then(loadDashboard);
+    });
+    const cctvVideo = document.getElementById("cctvVideo");
+    cctvVideo.addEventListener("loadeddata", () => {
+      const camera = state.cameras.find(c => c.camera_id === state.selectedCamera);
+      hideVideoFallback();
+      updateVideoHud(cctvVideo, camera ? camera.camera_id : state.selectedCamera);
+      if (camera) scheduleVideoReadinessCheck(cctvVideo, camera);
+    });
+    cctvVideo.addEventListener("canplay", () => {
+      hideVideoFallback();
+      updateVideoHud(cctvVideo, state.selectedCamera);
+    });
+    cctvVideo.addEventListener("playing", () => {
+      const camera = state.cameras.find(c => c.camera_id === state.selectedCamera);
+      hideVideoFallback();
+      updateVideoHud(cctvVideo, camera ? camera.camera_id : state.selectedCamera);
+      if (camera) scheduleVideoReadinessCheck(cctvVideo, camera);
+    });
+    cctvVideo.addEventListener("timeupdate", () => {
+      if (cctvVideo.readyState >= 2) {
+        hideVideoFallback();
+        updateVideoHud(cctvVideo, state.selectedCamera);
+      }
+    });
+    cctvVideo.addEventListener("stalled", () => {
+      setText("cameraHud", `${state.selectedCamera} buffering; tracking overlay live`);
+    });
+    cctvVideo.addEventListener("error", () => showVideoFallback("CCTV video decode issue", "Chrome could not render this clip, so this panel is showing the live detection overlay feed."));
+    function animateOverlay(now) {
+      if (!state.lastOverlayRenderAt || now - state.lastOverlayRenderAt > 120) {
+        renderOverlay(state.eventTimeline.length ? state.eventTimeline : state.lastEvents);
+        state.lastOverlayRenderAt = now;
+      }
+      requestAnimationFrame(animateOverlay);
+    }
+    requestAnimationFrame(animateOverlay);
+    loadCameras().then(() => Promise.all([loadDashboard(), loadTrackingTimeline()])).catch(loadDashboard);
+    setInterval(loadDashboard, 5000);
+    setInterval(loadTrackingTimeline, 60000);
   </script>
 </body>
 </html>"""
